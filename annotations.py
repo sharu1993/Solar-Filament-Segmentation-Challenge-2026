@@ -31,7 +31,7 @@ def view_annotations(coco, img_id=None, num_samples=1):
 
         #Display image
         fig,ax = plt.subplots()#plt.figure(figsize=(12,10))
-        ax.imshow(image)
+        ax.imshow(image,cmap='gray')
 
         #get annotation data
         ann_id=coco.getAnnIds(imgIds=[id]) #convert single id to a list, will not work otherwise
@@ -44,5 +44,13 @@ def view_annotations(coco, img_id=None, num_samples=1):
             rect=patches.Rectangle((x,y),w,h,fill=False,color='red')
             ax.add_patch(rect)
 
+        #draw segmented regions
+        for seg in anns:
+            segment = seg['segmentation']
+            if isinstance(segment,list):
+                for s in segment:
+                    s=np.array(s).reshape(-1,2)
+                    poly=patches.Polygon(s,fill=False, color='blue')
+                    ax.add_patch(poly)
         plt.show()
         
