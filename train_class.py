@@ -101,12 +101,10 @@ class TrainBox:
             if best_val_loss>val_loss:
                 self._best_model=self._model
                 best_val_loss=val_loss
-                best_val_acc=acc
                 torch.save({
                     "epoch":epoch,
                     "model_state_dict":self._model.state_dict(),
                     "optimizer_state_dict":self._optimizer.state_dict(),
-                    "val_acc":acc,
                     "val_loss":val_loss,
                     "scheduler_state_dict":self._scheduler.state_dict()
                 },"best_model.pt")
@@ -115,7 +113,6 @@ class TrainBox:
             #mlflow logging
             mlflow.log_metric("train_loss",train_loss,step=epoch)
             mlflow.log_metric("valid_loss",val_loss,step=epoch)
-            mlflow.log_metric("accuracy",acc,step=epoch)
             mlflow.log_metric("cur_lr",cur_lr,step=epoch)
         print(f"Training done")
         mlflow.log_metric("Best Validation Accuracy", best_val_acc)

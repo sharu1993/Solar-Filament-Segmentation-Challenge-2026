@@ -51,11 +51,15 @@ class UNet(torch.nn.Module):
             x=encoder(x)
             skip_connections.append(x) #store output of encoders for skip connections. Will be used to augment decoder inputs
             x=self.maxpool(x)
+        print(x.shape)
 
         x=self.bottleneck(x)
+        print(x.shape)
 
         skip_connections=skip_connections[::-1] #reverse it
+        print(x.shape)
 
+        pdb.set_trace()
         for idx in range(0,len(self.decoder),2):
             x=self.decoder[idx](x)
             skip=skip_connections[idx//2]
@@ -63,6 +67,9 @@ class UNet(torch.nn.Module):
                 x=torch.nn.functional.interpolate(x,size=skip.shape[2:])
             concat=torch.cat((skip,x),dim=1)
             x=self.decoder[idx+1](concat)
+            print(x.shape)
+        pdb.set_trace()
+        print(x.shape)
 
         # output layer
         x=self.final_conv(x)
