@@ -32,7 +32,8 @@ if __name__=="__main__":
     data=dataset.Dataset(
         image_dir="./MAGFiLO_1.0_Kaggle_2026/train/train_images",
         annotation_file="./MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json",
-        img_size=256
+        resize_to=1024,
+        crop_size=512
     )
 
     train = TrainBox.TrainBox(
