@@ -10,6 +10,7 @@ import unet
 import torch
 import train_class as TrainBox
 import dataset
+import losses
 
 IMAGE_DIR="./MAGFiLO_1.0_Kaggle_2026/train/train_images"
 ANNOTATION_FILE="./MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json"
@@ -49,7 +50,7 @@ if __name__=="__main__":
         model=model,
         optimizer=optimizer,
         scheduler=scheduler,
-        criterion=torch.nn.BCELoss(),
+        criterion=losses.BCEDiceLoss(),   #BCE + Dice: Dice is not swamped by the ~99.7% background pixels
         epochs=10,
         train_data=train_data,
         val_data=val_data)
