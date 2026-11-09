@@ -29,10 +29,10 @@ _Last updated: 2026-11-09. Each code change gets approval before editing._
 - [ ] Re-run and confirm the `Fatal Python error` is gone (suspects: pdb, duplicate OpenMP on macOS)
 
 ## Phase 1 – Data correctness
-- [ ] Build masks at 2048×2048 (from `coco.imgs[id]` height/width), then resize/crop
-- [ ] Rasterise **every** filament of the image and merge them into one mask (current `frPyObjects` + `.squeeze(-1)` path is fragile; use `coco.annToMask` or `cv2.fillPoly` per filament, OR-combined)
+- [x] Build masks at 2048×2048 (from `coco.imgs[id]` height/width), then resize/crop — done in 5427174 (resize to 1024 + 512 crop; verified with check_masks.py)
+- [x] Rasterise **every** filament of the image and merge them into one mask (current `frPyObjects` + `.squeeze(-1)` path is fragile; use `coco.annToMask` or `cv2.fillPoly` per filament, OR-combined) — done in 5427174 (coco.annToMask)
 - [ ] Also keep an **instance map** (filament id per pixel) alongside the binary mask – needed for per-filament metrics
-- [ ] Training samples: keep each annotator copy as its own sample (allowed by Kaggle) – baseline approach
+- [x] Training samples: keep each annotator copy as its own sample (allowed by Kaggle) – baseline approach — already the case: dataset.py uses every image entry (coco.getImgIds)
 - [ ] _Optional later:_ label fusion across copies (union / majority vote / soft label = fraction of annotators; match filaments by IoU first) and compare against the baseline
 - [ ] Seeded train/val split **grouped by file_name** (all copies of an image on the same side), optionally grouped by date; stratify by filaments-per-image
 - [ ] Validation: score each val image against all of its annotator copies (mean), mirroring the likely official protocol
