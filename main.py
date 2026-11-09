@@ -11,19 +11,34 @@ import torch
 import train_class as TrainBox
 import dataset
 
+IMAGE_DIR="./MAGFiLO_1.0_Kaggle_2026/train/train_images"
+ANNOTATION_FILE="./MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json"
+
 if __name__=="__main__":
-    coco = annotations.read_coco_annotations("MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json")
+    coco = annotations.read_coco_annotations(ANNOTATION_FILE)
     #annotations.view_annotations(coco,num_samples=-1)
     
     model = unet.UNet(in_channels=1,out_channels=1)
     print(f'Model: {model}')
     print(f'Number of parameters: {sum(p.numel() for p in model.parameters())}')
     
-    data=dataset.Dataset(
-        image_dir="./MAGFiLO_1.0_Kaggle_2026/train/train_images",
-        annotation_file="./MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json",
+    #split by image file so annotator copies of the same image never end up in both train and val
+    train_ids, val_ids = dataset.split_by_file(coco, val_fraction=0.2, seed=42)
+    print(f"Split by image file: {len(train_ids)} train entries, {len(val_ids)} validation entries")
+
+    train_data=dataset.Dataset(
+        image_dir=IMAGE_DIR,
+        annotation_file=ANNOTATION_FILE,
         resize_to=1024,
-        crop_size=512
+        crop_size=512,          #random 512x512 crops for training
+        img_ids=train_ids
+    )
+    val_data=dataset.Dataset(
+        image_dir=IMAGE_DIR,
+        annotation_file=ANNOTATION_FILE,
+        resize_to=1024,
+        crop_size=None,         #whole 1024x1024 image for validation
+        img_ids=val_ids
     )
 
     optimizer=torch.optim.Adam(model.parameters(),lr=0.001)
@@ -36,7 +51,8 @@ if __name__=="__main__":
         scheduler=scheduler,
         criterion=torch.nn.BCELoss(),
         epochs=10,
-        data=data)
+        train_data=train_data,
+        val_data=val_data)
 
     train.prep_data_loaders()
     train.train()

@@ -1,3 +1,4 @@
+import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -9,17 +10,28 @@ import torchvision.transforms.functional as TF
 
 import pdb
 
+def split_by_file(coco, val_fraction=0.2, seed=42):
+    """Split image ids into train/val so that all annotator copies of one image file land on the same side."""
+    all_ids=coco.getImgIds()
+    files=sorted({coco.imgs[i]['file_name'] for i in all_ids})
+    random.Random(seed).shuffle(files)
+    val_files=set(files[:round(len(files)*val_fraction)])
+    train_ids=[i for i in all_ids if coco.imgs[i]['file_name'] not in val_files]
+    val_ids=[i for i in all_ids if coco.imgs[i]['file_name'] in val_files]
+    return train_ids, val_ids
+
 class Dataset(Dataset):
-    def __init__(self, image_dir, annotation_file, resize_to=1024, crop_size=512):
+    def __init__(self, image_dir, annotation_file, resize_to=1024, crop_size=512, img_ids=None):
         """
         resize_to: side length the full 2048x2048 image AND mask are shrunk to (2048 -> 1024 = 2x).
         crop_size: side of the random crop taken (same window) from image and mask. None = no crop.
+        img_ids: which image ids to use (e.g. from split_by_file). None = all.
         """
         self.image_dir=image_dir
         self.coco=COCO(annotation_file)
         self.resize_to=resize_to
         self.crop_size=crop_size
-        self.img_ids=self.coco.getImgIds()
+        self.img_ids=list(img_ids) if img_ids is not None else self.coco.getImgIds()
 
         # Applied after resize + crop
         self.image_transform = transforms.Compose([

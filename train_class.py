@@ -11,7 +11,8 @@ class TrainBox:
             optimizer = None,
             criterion = None,
             scheduler = None,
-            data: dataset.Dataset = None,
+            train_data: dataset.Dataset = None,
+            val_data: dataset.Dataset = None,
             epochs = 100,
             mlflow_log:bool=True
     ):
@@ -23,7 +24,8 @@ class TrainBox:
 
         self.epochs=epochs
         
-        self.data=data
+        self.train_data=train_data
+        self.val_data=val_data
         self._trainloader=None
         self._validloader=None
         self._testloader=None
@@ -43,12 +45,10 @@ class TrainBox:
     def prep_data_loaders(
             self
     ):
-        train_size=int(0.8*len(self.data))
-        val_size=len(self.data)-train_size
-        train_data, val_data=torch.utils.data.random_split(self.data,[train_size,val_size])
-        #dataloaders
-        self._trainloader=torch.utils.data.DataLoader(train_data,batch_size=4,shuffle=True)
-        self._validloader=torch.utils.data.DataLoader(val_data,batch_size=4,shuffle=False)
+        #train/val are split by image file beforehand (dataset.split_by_file), so no image is in both
+        self._trainloader=torch.utils.data.DataLoader(self.train_data,batch_size=4,shuffle=True)
+        #validation uses whole 1024x1024 images, one at a time, same pixels every epoch
+        self._validloader=torch.utils.data.DataLoader(self.val_data,batch_size=1,shuffle=False)
 
     def train(self):
         self._model.to(self._device)
@@ -58,7 +58,7 @@ class TrainBox:
         #training loop
         print(f"Will run for {self.epochs} epoch(s).")
         best_val_loss=float('inf')
-        best_val_iou=0.0
+        best_val_iou=-1.0   #below any real IoU, so the first epoch is always saved
         for epoch in range(self.epochs):
             self._model.train()
             train_loss=0
@@ -104,8 +104,8 @@ class TrainBox:
                 self._scheduler.step(val_loss)
 
             print(f"Epoch {epoch+1}/{self.epochs}: Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Validation IoU: {val_iou:.4f}")
-            #save model with improving validation loss
-            if best_val_loss>val_loss:
+            #save model with improving validation IoU
+            if val_iou>best_val_iou:
                 self._best_model=copy.deepcopy(self._model)
                 best_val_loss=val_loss
                 best_val_iou=val_iou
@@ -124,7 +124,7 @@ class TrainBox:
             mlflow.log_metric("valid_loss",val_loss,step=epoch)
             mlflow.log_metric("valid_iou",val_iou,step=epoch)
             mlflow.log_metric("cur_lr",cur_lr,step=epoch)
-        print(f"Training done")
+        print(f"Training done. Best validation IoU: {best_val_iou:.4f} (validation loss {best_val_loss:.4f})")
         mlflow.log_metric("best_valid_iou", best_val_iou)
 
     def run(self):
