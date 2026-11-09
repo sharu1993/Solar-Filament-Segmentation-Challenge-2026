@@ -1,8 +1,8 @@
+import copy
 import torch
 import torchvision
 import dataset
 import mlflow
-import pdb
 
 class TrainBox:
     def __init__(
@@ -47,8 +47,8 @@ class TrainBox:
         val_size=len(self.data)-train_size
         train_data, val_data=torch.utils.data.random_split(self.data,[train_size,val_size])
         #dataloaders
-        self._trainloader=torch.utils.data.DataLoader(train_data,batch_size=16,shuffle=True)
-        self._validloader=torch.utils.data.DataLoader(val_data,batch_size=16,shuffle=False)
+        self._trainloader=torch.utils.data.DataLoader(train_data,batch_size=4,shuffle=True)
+        self._validloader=torch.utils.data.DataLoader(val_data,batch_size=4,shuffle=False)
 
     def train(self):
         self._model.to(self._device)
@@ -57,13 +57,14 @@ class TrainBox:
             raise RuntimeError("Data has not been loaded.")
         #training loop
         print(f"Will run for {self.epochs} epoch(s).")
+        best_val_loss=float('inf')
+        best_val_iou=0.0
         for epoch in range(self.epochs):
             self._model.train()
             train_loss=0
             cur_lr=self._optimizer.param_groups[0]['lr']
             #training
             for images,masks in self._trainloader:
-                pdb.set_trace()
                 images,masks=images.to(self._device),masks.to(self._device)
 
                 self._optimizer.zero_grad()
@@ -73,49 +74,58 @@ class TrainBox:
                 loss.backward()
                 self._optimizer.step()
 
-                train_loss+=loss
+                train_loss+=loss.item()
             train_loss/=len(self._trainloader)
 
             #validation
             self._model.eval()
             val_loss=0
+            intersection=0
+            union=0
 
-            best_val_loss=float('inf')
-            best_val_acc=float('inf')
-            
             with torch.no_grad():
                 for images,masks in self._validloader:
                     images,masks=images.to(self._device),masks.to(self._device)
                     outputs=self._model(images)
                     loss=self._criterion(outputs,masks)
-                    val_loss+=loss
+                    val_loss+=loss.item()
+                    #pixel IoU over the whole validation set (prediction = probability > 0.5)
+                    preds=outputs>0.5
+                    targets=masks>0.5
+                    intersection+=(preds&targets).sum().item()
+                    union+=(preds|targets).sum().item()
 
                 val_loss/=len(self._validloader)
+                val_iou=intersection/max(union,1)
 
             
             #pass validation loss to scheduler
-            self._scheduler.step(val_loss)
+            if self._scheduler is not None:
+                self._scheduler.step(val_loss)
 
-            print(f"Epoch {epoch}/{self.epochs}: Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Validation Accuracy: {acc:.4f}")
+            print(f"Epoch {epoch+1}/{self.epochs}: Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Validation IoU: {val_iou:.4f}")
             #save model with improving validation loss
             if best_val_loss>val_loss:
-                self._best_model=self._model
+                self._best_model=copy.deepcopy(self._model)
                 best_val_loss=val_loss
+                best_val_iou=val_iou
                 torch.save({
                     "epoch":epoch,
                     "model_state_dict":self._model.state_dict(),
                     "optimizer_state_dict":self._optimizer.state_dict(),
                     "val_loss":val_loss,
-                    "scheduler_state_dict":self._scheduler.state_dict()
+                    "val_iou":val_iou,
+                    "scheduler_state_dict":self._scheduler.state_dict() if self._scheduler is not None else None
                 },"best_model.pt")
                 print(f"Model saved")
             
             #mlflow logging
             mlflow.log_metric("train_loss",train_loss,step=epoch)
             mlflow.log_metric("valid_loss",val_loss,step=epoch)
+            mlflow.log_metric("valid_iou",val_iou,step=epoch)
             mlflow.log_metric("cur_lr",cur_lr,step=epoch)
         print(f"Training done")
-        mlflow.log_metric("Best Validation Accuracy", best_val_acc)
+        mlflow.log_metric("best_valid_iou", best_val_iou)
 
     def run(self):
         self.prep_data_loaders()

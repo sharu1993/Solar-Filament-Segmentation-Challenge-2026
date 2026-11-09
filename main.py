@@ -19,16 +19,6 @@ if __name__=="__main__":
     print(f'Model: {model}')
     print(f'Number of parameters: {sum(p.numel() for p in model.parameters())}')
     
-    device=torch.device("cpu")
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print("Using GPU")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-        print("Using MPS")
-
-    model.to(device)
-
     data=dataset.Dataset(
         image_dir="./MAGFiLO_1.0_Kaggle_2026/train/train_images",
         annotation_file="./MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json",
@@ -36,9 +26,14 @@ if __name__=="__main__":
         crop_size=512
     )
 
+    optimizer=torch.optim.Adam(model.parameters(),lr=0.001)
+    #halve the learning rate when validation loss stops improving for 2 epochs
+    scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,mode="min",factor=0.5,patience=2)
+
     train = TrainBox.TrainBox(
         model=model,
-        optimizer=torch.optim.Adam(model.parameters(),lr=0.001),
+        optimizer=optimizer,
+        scheduler=scheduler,
         criterion=torch.nn.BCELoss(),
         epochs=10,
         data=data)
