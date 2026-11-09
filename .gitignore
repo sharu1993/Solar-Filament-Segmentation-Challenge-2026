@@ -231,3 +231,6 @@ artifacts/
 MAGFiLO_1.0_Kaggle_2026/
 # Output of check_masks.py
 mask_check_real.png
+
+# Model checkpoints
+*.pt
