@@ -31,8 +31,9 @@ if __name__=="__main__":
         image_dir=IMAGE_DIR,
         annotation_file=ANNOTATION_FILE,
         resize_to=1024,
-        crop_size=512,          #random 512x512 crops for training
-        img_ids=train_ids
+        crop_size=512,          #512x512 crops for training
+        img_ids=train_ids,
+        filament_crop_prob=0.8  #80% of crops placed on a filament, 20% anywhere
     )
     val_data=dataset.Dataset(
         image_dir=IMAGE_DIR,
