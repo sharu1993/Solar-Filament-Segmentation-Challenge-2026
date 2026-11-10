@@ -52,7 +52,9 @@ if __name__=="__main__":
         optimizer=optimizer,
         scheduler=scheduler,
         criterion=losses.BCEDiceLoss(),   #BCE + Dice: Dice is not swamped by the ~99.7% background pixels
-        epochs=10,
+        epochs=30,                    #maximum; early stopping usually ends sooner
+        early_stopping_patience=5,    #stop if validation IoU has not improved for 5 epochs
+        num_workers=4,                #prepare batches in 4 background processes
         train_data=train_data,
         val_data=val_data)
 

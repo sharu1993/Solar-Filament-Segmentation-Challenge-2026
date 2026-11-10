@@ -14,6 +14,8 @@ class TrainBox:
             train_data: dataset.Dataset = None,
             val_data: dataset.Dataset = None,
             epochs = 100,
+            early_stopping_patience = None,
+            num_workers = 0,
             mlflow_log:bool=True
     ):
         self._model=model
@@ -23,6 +25,8 @@ class TrainBox:
         self._scheduler=scheduler
 
         self.epochs=epochs
+        self.early_stopping_patience=early_stopping_patience  #stop after this many epochs without a better val IoU (None = never)
+        self.num_workers=num_workers  #background processes preparing batches while the GPU trains (0 = main process only)
         
         self.train_data=train_data
         self.val_data=val_data
@@ -46,9 +50,11 @@ class TrainBox:
             self
     ):
         #train/val are split by image file beforehand (dataset.split_by_file), so no image is in both
-        self._trainloader=torch.utils.data.DataLoader(self.train_data,batch_size=4,shuffle=True)
+        #persistent_workers keeps the worker processes alive between epochs instead of restarting them
+        workers=dict(num_workers=self.num_workers, persistent_workers=self.num_workers>0)
+        self._trainloader=torch.utils.data.DataLoader(self.train_data,batch_size=4,shuffle=True,**workers)
         #validation uses whole 1024x1024 images, one at a time, same pixels every epoch
-        self._validloader=torch.utils.data.DataLoader(self.val_data,batch_size=1,shuffle=False)
+        self._validloader=torch.utils.data.DataLoader(self.val_data,batch_size=1,shuffle=False,**workers)
 
     def train(self):
         self._model.to(self._device)
@@ -58,6 +64,7 @@ class TrainBox:
         #training loop
         print(f"Will run for {self.epochs} epoch(s).")
         best_val_loss=float('inf')
+        epochs_without_improvement=0
         best_val_iou=-1.0   #below any real IoU, so the first epoch is always saved
         for epoch in range(self.epochs):
             self._model.train()
@@ -118,12 +125,20 @@ class TrainBox:
                     "scheduler_state_dict":self._scheduler.state_dict() if self._scheduler is not None else None
                 },"best_model.pt")
                 print(f"Model saved")
+                epochs_without_improvement=0
+            else:
+                epochs_without_improvement+=1
             
             #mlflow logging
             mlflow.log_metric("train_loss",train_loss,step=epoch)
             mlflow.log_metric("valid_loss",val_loss,step=epoch)
             mlflow.log_metric("valid_iou",val_iou,step=epoch)
             mlflow.log_metric("cur_lr",cur_lr,step=epoch)
+
+            #early stopping: no better validation IoU for `early_stopping_patience` epochs in a row
+            if self.early_stopping_patience is not None and epochs_without_improvement>=self.early_stopping_patience:
+                print(f"Early stopping: no improvement in validation IoU for {epochs_without_improvement} epochs.")
+                break
         print(f"Training done. Best validation IoU: {best_val_iou:.4f} (validation loss {best_val_loss:.4f})")
         mlflow.log_metric("best_valid_iou", best_val_iou)
 
