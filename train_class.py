@@ -32,6 +32,7 @@ class TrainBox:
         self._scheduler=scheduler
 
         self.epochs=epochs
+        self.mlflow_log=mlflow_log  #False = train without logging anything to MLflow
         self.early_stopping_patience=early_stopping_patience  #stop after this many epochs without a better val IoU (None = never)
         self.num_workers=num_workers  #background processes preparing batches while the GPU trains (0 = main process only)
         
@@ -63,11 +64,30 @@ class TrainBox:
         #validation uses whole 1024x1024 images, one at a time, same pixels every epoch
         self._validloader=torch.utils.data.DataLoader(self.val_data,batch_size=1,shuffle=False,**workers)
 
+    def _log_metric(self,key,value,step=None):
+        if self.mlflow_log:
+            mlflow.log_metric(key,value,step=step)
+
     def train(self):
         self._model.to(self._device)
         #check if dataloaders are valid
         if self._trainloader == None or self._validloader==None: #or self._testloader==None:
             raise RuntimeError("Data has not been loaded.")
+        if self.mlflow_log:
+            #training settings that live in this class (data/model settings are logged in main.py)
+            mlflow.log_params({
+                "epochs_max":self.epochs,
+                "early_stopping_patience":self.early_stopping_patience,
+                "num_workers":self.num_workers,
+                "train_batch_size":self._trainloader.batch_size,
+                "val_batch_size":self._validloader.batch_size,
+                "train_samples":len(self.train_data),
+                "val_samples":len(self.val_data),
+                "optimizer":type(self._optimizer).__name__,
+                "scheduler":type(self._scheduler).__name__ if self._scheduler is not None else None,
+                "loss":type(self._criterion).__name__,
+                "device":str(self._device),
+            })
         #training loop
         print(f"Will run for {self.epochs} epoch(s).")
         best_val_loss=float('inf')
@@ -142,17 +162,21 @@ class TrainBox:
             else:
                 epochs_without_improvement+=1
             
-            #mlflow logging
-            mlflow.log_metric("train_loss",train_loss,step=epoch)
-            mlflow.log_metric("valid_loss",val_loss,step=epoch)
-            mlflow.log_metric("valid_iou",val_iou,step=epoch)
-            mlflow.log_metric("cur_lr",cur_lr,step=epoch)
+            #mlflow logging (best_valid_iou every epoch, so it is kept even if training is interrupted)
+            self._log_metric("train_loss",train_loss,step=epoch)
+            self._log_metric("valid_loss",val_loss,step=epoch)
+            self._log_metric("valid_iou",val_iou,step=epoch)
+            self._log_metric("best_valid_iou",best_val_iou,step=epoch)
+            self._log_metric("cur_lr",cur_lr,step=epoch)
 
             #timing: this epoch (incl. checkpoint saving), running average, and worst-case time left
             epoch_times.append(time.perf_counter()-epoch_start)
             avg=sum(epoch_times)/len(epoch_times)
             print(f"  Time: train {fmt_time(train_time)}, validation {fmt_time(val_time)}, epoch {fmt_time(epoch_times[-1])} | "
                   f"average {fmt_time(avg)}/epoch | at most {fmt_time(avg*(self.epochs-epoch-1))} left")
+            self._log_metric("train_time_s",train_time,step=epoch)
+            self._log_metric("val_time_s",val_time,step=epoch)
+            self._log_metric("epoch_time_s",epoch_times[-1],step=epoch)
 
             #early stopping: no better validation IoU for `early_stopping_patience` epochs in a row
             if self.early_stopping_patience is not None and epochs_without_improvement>=self.early_stopping_patience:
@@ -161,7 +185,7 @@ class TrainBox:
         print(f"Training done. Best validation IoU: {best_val_iou:.4f} (validation loss {best_val_loss:.4f})")
         print(f"Total time {fmt_time(time.perf_counter()-training_start)} for {len(epoch_times)} epoch(s), "
               f"average {fmt_time(sum(epoch_times)/max(len(epoch_times),1))}/epoch")
-        mlflow.log_metric("best_valid_iou", best_val_iou)
+        self._log_metric("epochs_run",len(epoch_times))
 
     def run(self):
         self.prep_data_loaders()
@@ -184,5 +208,5 @@ class TrainBox:
                 total+=labels.size(0)
         test_acc=correct/total
         print(f"Test Accuracy: {test_acc:.4f}")
-        mlflow.log_metric("Test Accuracy",test_acc)
+        self._log_metric("Test Accuracy",test_acc)
         return test_acc
