@@ -1,8 +1,15 @@
 import copy
+import time
 import torch
 import torchvision
 import dataset
 import mlflow
+
+def fmt_time(seconds):
+    """Seconds -> 'm:ss' (or 'h:mm:ss' when over an hour)."""
+    m,s=divmod(int(round(seconds)),60)
+    h,m=divmod(m,60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 class TrainBox:
     def __init__(
@@ -65,8 +72,11 @@ class TrainBox:
         print(f"Will run for {self.epochs} epoch(s).")
         best_val_loss=float('inf')
         epochs_without_improvement=0
+        epoch_times=[]
+        training_start=time.perf_counter()
         best_val_iou=-1.0   #below any real IoU, so the first epoch is always saved
         for epoch in range(self.epochs):
+            epoch_start=time.perf_counter()
             self._model.train()
             train_loss=0
             cur_lr=self._optimizer.param_groups[0]['lr']
@@ -83,6 +93,7 @@ class TrainBox:
 
                 train_loss+=loss.item()
             train_loss/=len(self._trainloader)
+            train_time=time.perf_counter()-epoch_start
 
             #validation
             self._model.eval()
@@ -106,6 +117,8 @@ class TrainBox:
                 val_iou=intersection/max(union,1)
 
             
+            val_time=time.perf_counter()-epoch_start-train_time
+
             #pass validation loss to scheduler
             if self._scheduler is not None:
                 self._scheduler.step(val_loss)
@@ -135,11 +148,19 @@ class TrainBox:
             mlflow.log_metric("valid_iou",val_iou,step=epoch)
             mlflow.log_metric("cur_lr",cur_lr,step=epoch)
 
+            #timing: this epoch (incl. checkpoint saving), running average, and worst-case time left
+            epoch_times.append(time.perf_counter()-epoch_start)
+            avg=sum(epoch_times)/len(epoch_times)
+            print(f"  Time: train {fmt_time(train_time)}, validation {fmt_time(val_time)}, epoch {fmt_time(epoch_times[-1])} | "
+                  f"average {fmt_time(avg)}/epoch | at most {fmt_time(avg*(self.epochs-epoch-1))} left")
+
             #early stopping: no better validation IoU for `early_stopping_patience` epochs in a row
             if self.early_stopping_patience is not None and epochs_without_improvement>=self.early_stopping_patience:
                 print(f"Early stopping: no improvement in validation IoU for {epochs_without_improvement} epochs.")
                 break
         print(f"Training done. Best validation IoU: {best_val_iou:.4f} (validation loss {best_val_loss:.4f})")
+        print(f"Total time {fmt_time(time.perf_counter()-training_start)} for {len(epoch_times)} epoch(s), "
+              f"average {fmt_time(sum(epoch_times)/max(len(epoch_times),1))}/epoch")
         mlflow.log_metric("best_valid_iou", best_val_iou)
 
     def run(self):
