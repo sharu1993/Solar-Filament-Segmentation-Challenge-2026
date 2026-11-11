@@ -1,6 +1,8 @@
 import copy
 import os
+import random
 import time
+import numpy as np
 import torch
 import torchvision
 import dataset
@@ -25,7 +27,8 @@ class TrainBox:
             early_stopping_patience = None,
             num_workers = 0,
             checkpoint_path = "best_model.pt",
-            mlflow_log:bool=True
+            mlflow_log:bool=True,
+            run_config:dict=None
     ):
         self._model=model
         self._best_model=model
@@ -36,6 +39,11 @@ class TrainBox:
         self.epochs=epochs
         self.mlflow_log=mlflow_log  #False = train without logging anything to MLflow
         self.checkpoint_path=checkpoint_path  #where the best model of this run is saved
+        #latest state, rewritten every epoch so an interrupted run can be resumed (main.py --resume)
+        self.last_checkpoint_path=os.path.splitext(checkpoint_path)[0]+"_last.pt"
+        self.run_config=run_config  #main.py settings, stored in the checkpoint so a resume rebuilds the same run
+        self._start_epoch=0         #>0 after load_state(): continue from there
+        self._resume_state=None     #best IoU/loss and early-stopping counter restored by load_state()
         self.early_stopping_patience=early_stopping_patience  #stop after this many epochs without a better val IoU (None = never)
         self.num_workers=num_workers  #background processes preparing batches while the GPU trains (0 = main process only)
         
@@ -71,12 +79,60 @@ class TrainBox:
         if self.mlflow_log:
             mlflow.log_metric(key,value,step=step)
 
+    def _save_last(self,epoch,best_val_iou,best_val_loss,epochs_without_improvement):
+        """Full training state after `epoch`. Written to a temp file first, then renamed, so a crash
+        mid-save never leaves a half-written checkpoint."""
+        active=mlflow.active_run() if self.mlflow_log else None
+        state={
+            "epoch":epoch,
+            "model_state_dict":self._model.state_dict(),
+            "optimizer_state_dict":self._optimizer.state_dict(),
+            "scheduler_state_dict":self._scheduler.state_dict() if self._scheduler is not None else None,
+            "best_model_state_dict":self._best_model.state_dict(),
+            "best_val_iou":best_val_iou,
+            "best_val_loss":best_val_loss,
+            "epochs_without_improvement":epochs_without_improvement,
+            "rng_torch":torch.get_rng_state(),
+            "rng_python":random.getstate(),
+            "rng_numpy":np.random.get_state(),
+            "config":self.run_config,
+            "best_checkpoint_path":self.checkpoint_path,
+            "mlflow_run_id":active.info.run_id if active is not None else None,
+        }
+        os.makedirs(os.path.dirname(self.last_checkpoint_path) or ".",exist_ok=True)
+        tmp=self.last_checkpoint_path+".tmp"
+        torch.save(state,tmp)
+        os.replace(tmp,self.last_checkpoint_path)
+
+    def load_state(self,state):
+        """Restore from a checkpoint dict: a `_last.pt` (full state) or an older best-model checkpoint
+        (no early-stopping counter or RNG state: those start fresh)."""
+        self._model.load_state_dict(state["model_state_dict"])
+        self._model.to(self._device)
+        self._optimizer.load_state_dict(state["optimizer_state_dict"])
+        if self._scheduler is not None and state.get("scheduler_state_dict") is not None:
+            self._scheduler.load_state_dict(state["scheduler_state_dict"])
+        self._best_model=copy.deepcopy(self._model)
+        if state.get("best_model_state_dict") is not None:
+            self._best_model.load_state_dict(state["best_model_state_dict"])
+        if "rng_torch" in state:
+            torch.set_rng_state(state["rng_torch"])
+            random.setstate(state["rng_python"])
+            np.random.set_state(state["rng_numpy"])
+        self._start_epoch=state["epoch"]+1
+        self._resume_state={
+            "best_val_iou":state.get("best_val_iou",state.get("val_iou",-1.0)),
+            "best_val_loss":state.get("best_val_loss",state.get("val_loss",float('inf'))),
+            "epochs_without_improvement":state.get("epochs_without_improvement",0),
+        }
+        print(f"Resuming after epoch {self._start_epoch} (best validation IoU so far {self._resume_state['best_val_iou']:.4f})")
+
     def train(self):
         self._model.to(self._device)
         #check if dataloaders are valid
         if self._trainloader == None or self._validloader==None: #or self._testloader==None:
             raise RuntimeError("Data has not been loaded.")
-        if self.mlflow_log:
+        if self.mlflow_log and self._resume_state is None:   #a resumed run already has its params
             #training settings that live in this class (data/model settings are logged in main.py)
             mlflow.log_params({
                 "epochs_max":self.epochs,
@@ -93,13 +149,17 @@ class TrainBox:
                 "checkpoint_path":self.checkpoint_path,
             })
         #training loop
-        print(f"Will run for {self.epochs} epoch(s).")
+        print(f"Will run epochs {self._start_epoch+1}-{self.epochs}.")
         best_val_loss=float('inf')
         epochs_without_improvement=0
         epoch_times=[]
         training_start=time.perf_counter()
         best_val_iou=-1.0   #below any real IoU, so the first epoch is always saved
-        for epoch in range(self.epochs):
+        if self._resume_state is not None:
+            best_val_iou=self._resume_state["best_val_iou"]
+            best_val_loss=self._resume_state["best_val_loss"]
+            epochs_without_improvement=self._resume_state["epochs_without_improvement"]
+        for epoch in range(self._start_epoch,self.epochs):
             epoch_start=time.perf_counter()
             self._model.train()
             train_loss=0
@@ -182,6 +242,9 @@ class TrainBox:
             self._log_metric("train_time_s",train_time,step=epoch)
             self._log_metric("val_time_s",val_time,step=epoch)
             self._log_metric("epoch_time_s",epoch_times[-1],step=epoch)
+
+            #resume point: written every epoch, after logging, so a restart continues from the next epoch
+            self._save_last(epoch,best_val_iou,best_val_loss,epochs_without_improvement)
 
             #early stopping: no better validation IoU for `early_stopping_patience` epochs in a row
             if self.early_stopping_patience is not None and epochs_without_improvement>=self.early_stopping_patience:

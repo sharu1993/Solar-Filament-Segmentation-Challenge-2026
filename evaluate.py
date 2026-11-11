@@ -53,8 +53,9 @@ SIZE_NAMES=["<500 px","500-1500 px","1500-5000 px",">=5000 px"]
 
 
 def default_checkpoint():
-    """Newest checkpoint in checkpoints/ (one per training run); falls back to best_model.pt from older runs."""
-    runs=glob.glob("checkpoints/*.pt")
+    """Newest best-model checkpoint in checkpoints/ (one per training run; *_last.pt resume files are skipped);
+    falls back to best_model.pt from older runs."""
+    runs=[p for p in glob.glob("checkpoints/*.pt") if not p.endswith("_last.pt")]
     return max(runs,key=os.path.getmtime) if runs else "best_model.pt"
 
 

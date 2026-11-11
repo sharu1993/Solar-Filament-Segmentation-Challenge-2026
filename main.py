@@ -4,6 +4,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 
+import argparse
 import subprocess
 from datetime import datetime
 import annotations
@@ -47,6 +48,18 @@ if __name__=="__main__":
         num_workers=4,                #prepare batches in 4 background processes
     )
 
+    #--resume checkpoints/<run>_last.pt (or an older best checkpoint <run>.pt): continue that run
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--resume",default=None,help="checkpoint to continue training from")
+    args=parser.parse_args()
+    resume_state=None
+    if args.resume:
+        resume_state=torch.load(args.resume,map_location="cpu",weights_only=False)
+        if resume_state.get("config") is not None:
+            config=resume_state["config"]   #same settings as the interrupted run
+        else:
+            print("Checkpoint has no saved config: using the config above (must match the original run).")
+
     coco = annotations.read_coco_annotations(ANNOTATION_FILE)
     #annotations.view_annotations(coco,num_samples=-1)
     
@@ -81,8 +94,13 @@ if __name__=="__main__":
 
     #one checkpoint per run, named like the MLflow run (date + commit), so earlier models are never overwritten
     commit, dirty = git_commit()
-    run_name=f"{datetime.now():%Y-%m-%d_%H-%M}_{commit}"
-    checkpoint_path=os.path.join("checkpoints",f"{run_name}.pt")
+    if resume_state is not None:
+        #same run name and best-model file as the interrupted run
+        checkpoint_path=resume_state.get("best_checkpoint_path") or args.resume
+        run_name=os.path.splitext(os.path.basename(checkpoint_path))[0]
+    else:
+        run_name=f"{datetime.now():%Y-%m-%d_%H-%M}_{commit}"
+        checkpoint_path=os.path.join("checkpoints",f"{run_name}.pt")
 
     train = TrainBox.TrainBox(
         model=model,
@@ -93,17 +111,30 @@ if __name__=="__main__":
         early_stopping_patience=config["early_stopping_patience"],
         num_workers=config["num_workers"],
         checkpoint_path=checkpoint_path,
+        run_config=config,
         train_data=train_data,
         val_data=val_data)
 
     train.prep_data_loaders()
+    if resume_state is not None:
+        train.load_state(resume_state)
 
     #MLflow: fixed location, named experiment, one run per training. The `with` block ends the run
     #properly even on a crash or Ctrl-C (marked FAILED / KILLED instead of left "running").
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT)
-    with mlflow.start_run(run_name=run_name):
-        mlflow.log_params(config)
-        mlflow.log_param("model_parameters", sum(p.numel() for p in model.parameters()))
-        mlflow.set_tags({"git_commit":commit, "git_uncommitted_changes":dirty})
-        train.train()
+    if resume_state is not None:
+        #reopen the interrupted MLflow run (looked up by name for checkpoints that predate run ids)
+        run_id=resume_state.get("mlflow_run_id")
+        if run_id is None:
+            found=mlflow.search_runs(filter_string=f"tags.mlflow.runName = '{run_name}'",output_format="list")
+            run_id=found[0].info.run_id if found else None
+        with mlflow.start_run(run_id=run_id,run_name=None if run_id else run_name):
+            mlflow.set_tag("resumed_at_commit",commit)
+            train.train()
+    else:
+        with mlflow.start_run(run_name=run_name):
+            mlflow.log_params(config)
+            mlflow.log_param("model_parameters", sum(p.numel() for p in model.parameters()))
+            mlflow.set_tags({"git_commit":commit, "git_uncommitted_changes":dirty})
+            train.train()
