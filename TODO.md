@@ -29,6 +29,16 @@ _Last updated: 2026-11-11 (after reading the Overview/Evaluation tab). Each code
 
 Speed on M1 (MPS, batch 4, 4 workers): ~12.5 min/epoch (10.6 train + 1.9 val) – GPU-bound, not data-bound.
 
+**Panoptic Quality** (`evaluate.py --sweep`, all 141 val images / 217 annotator copies, full 2048 resolution).
+Model: `best_model.pt` from the interrupted run `2026-11-10_06-01_7dd4d8b` (epoch 5, val IoU 0.445 – not the best model so far).
+| Post-processing (threshold / grouping px / min area px) | PQ | SQ | RQ | TP / FP / FN | pred per image (GT 7.3) |
+|---|---|---|---|---|---|
+| 0.5 / 0 / 0 (none) | 0.173 | 0.639 | 0.271 | 696 / 2849 / 897 | 16.3 |
+| 0.5 / 0 / 500 (size filter) | 0.242 | 0.640 | 0.377 | 606 / 1014 / 987 | 7.5 |
+| **0.4 / 61 / 500 (+ grouping)** | **0.277** | 0.633 | 0.437 | 680 / 839 / 913 | 7.0 |
+
+Findings: matched filaments are outlined reasonably (SQ ~0.63) but only 43% of real filaments are matched (RQ is the bottleneck); 451 / 1593 GT filaments are split into several raw pieces; threshold 0.3–0.5 makes little difference; grouping 61 px was the largest tried. Organisers' reference: PQ > 0.35 is "of great value".
+
 ## Phase 0 – Make it run
 - [x] Remove `pdb.set_trace()` + shape prints (unet.py ×2, train_class.py ×1) — afd12f9
 - [x] `ConvBlock`: pass `padding=padding` by keyword (currently lands in `stride`, so padding=0); drop the interpolate hack — afd12f9
@@ -75,11 +85,14 @@ Speed on M1 (MPS, batch 4, 4 workers): ~12.5 min/epoch (10.6 train + 1.9 val) �
 
 ## Phase 3 – Competition deliverable
 - [x] Read the Overview/Evaluation tab: exact metric + submission format — PQ, one CSV row per filament with 2048×2048 RLE counts (see Dataset facts)
-- [ ] **Local PQ evaluation on the validation set** (next): per-filament ground truth at 2048, prediction → probability map → upsample to 2048 → threshold → connected components → min-area filter; match predicted/GT filaments (IoU > 0.5), report PQ (+ SQ/RQ), TP/FP/FN, mean Dice, one-to-many / many-to-one counts; score each annotator copy
+- [x] **Local PQ evaluation on the validation set** — 7bb0d4c, 0658881 (`evaluate.py`: upsample to 2048, threshold, connected components, grouping, min-area filter; PQ/SQ/RQ, TP/FP/FN, Dice, one-to-many / many-to-one / raw splits; `--sweep`)
+- [ ] One checkpoint per training run (`checkpoints/<run name>.pt`) so good models are not overwritten; `evaluate.py` defaults to the newest
+- [ ] Full uninterrupted training run → re-run `evaluate.py --sweep` on its checkpoint
+- [ ] Post-processing experiments to raise RQ: grow each detected filament to its full extent (dilation by a few px; hysteresis on the probability map; intensity-based region growing into dark pixels); larger grouping distances (91, 121 px)
 - [ ] Inference script for the 180 test images at full resolution (tiling + stitching)
 - [ ] Post-processing into individual filaments: connected components, min-area filter, merge fragments, split touching filaments if needed
 - [ ] Per-filament confidence score (e.g. mean probability inside the component) for AP ranking
-- [ ] Threshold tuning on validation (pixel threshold + min-area) – tune for PQ, not pixel IoU
+- [ ] Threshold tuning on validation (pixel threshold + min-area) – tune for PQ, not pixel IoU — first sweep done (best 0.4 / 61 / 500); redo for each new model
 - [ ] Submission writer
 - [ ] Compare our PQ with the official self-evaluation notebook on the same predictions
 
@@ -90,4 +103,5 @@ Speed on M1 (MPS, batch 4, 4 workers): ~12.5 min/epoch (10.6 train + 1.9 val) �
 - [ ] README: problem, data, method, results table, example overlays
 - [ ] requirements.txt / environment file, unit tests for mask creation (incl. an image with many filaments)
 - [ ] Pipeline notebook (load weights → predict → submission CSV); weights small enough for the repo (state_dict only / fp16 or Git LFS)
+- [ ] Environment cleanup: only one OpenMP runtime (torch + OpenCV from the same source), then drop the `KMP_DUPLICATE_LIB_OK` workaround in main.py / evaluate.py
 - [ ] Ideas: spine as auxiliary target, clDice/skeleton loss for thin structures
