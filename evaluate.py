@@ -20,6 +20,13 @@ Usage (from the project folder):
     python evaluate.py --sweep                        # grid of thresholds x grouping x min areas, best by PQ
     python evaluate.py --limit 10                     # quick check on the first 10 validation images
 """
+import os
+#same workaround as main.py: torch and cv2 each load their own OpenMP runtime on macOS
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+
 import argparse
 import time
 from collections import defaultdict
