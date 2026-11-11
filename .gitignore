@@ -234,3 +234,5 @@ mask_check_real.png
 
 # Model checkpoints
 *.pt
+# Downloaded pretrained encoder weights
+pretrained/

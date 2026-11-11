@@ -40,7 +40,7 @@ import torch
 from pycocotools.coco import COCO
 
 import dataset
-import unet
+import resnet_unet
 
 IMAGE_DIR="./MAGFiLO_1.0_Kaggle_2026/train/train_images"
 ANNOTATION_FILE="./MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json"
@@ -60,8 +60,10 @@ def default_checkpoint():
 
 
 def load_model(checkpoint, device):
-    model=unet.UNet(in_channels=1,out_channels=1)
     state=torch.load(checkpoint,map_location="cpu",weights_only=False)
+    #architecture from the run config saved in the checkpoint; older checkpoints are the plain U-Net
+    config=state.get("config") or {}
+    model=resnet_unet.build_model(config.get("model","unet"),pretrained=False)   #weights come from the checkpoint
     model.load_state_dict(state["model_state_dict"] if "model_state_dict" in state else state)
     return model.to(device).eval()
 

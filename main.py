@@ -9,7 +9,7 @@ import subprocess
 from datetime import datetime
 import annotations
 import pdb
-import unet
+import resnet_unet
 import torch
 import mlflow
 import train_class as TrainBox
@@ -46,6 +46,8 @@ if __name__=="__main__":
         epochs=100,                   #long run (~21 h on the M1 at ~12.5 min/epoch)
         early_stopping_patience=15,   #stop only if validation IoU has not improved for 15 epochs
         num_workers=4,                #prepare batches in 4 background processes
+        model="resnet34_unet",        #"unet" (from scratch) or "resnet34_unet" (ImageNet-pretrained encoder)
+        pretrained=True,              #load ImageNet weights into the encoder (resnet34_unet only)
     )
 
     #--resume checkpoints/<run>_last.pt (or an older best checkpoint <run>.pt): continue that run
@@ -58,12 +60,13 @@ if __name__=="__main__":
         if resume_state.get("config") is not None:
             config=resume_state["config"]   #same settings as the interrupted run
         else:
-            print("Checkpoint has no saved config: using the config above (must match the original run).")
+            config["model"]="unet"   #checkpoints without a saved config predate the ResNet option
+            print("Checkpoint has no saved config: using the config above with the plain U-Net (must match the original run).")
 
     coco = annotations.read_coco_annotations(ANNOTATION_FILE)
     #annotations.view_annotations(coco,num_samples=-1)
     
-    model = unet.UNet(in_channels=1,out_channels=1)
+    model = resnet_unet.build_model(config.get("model","unet"), pretrained=config.get("pretrained",False) and resume_state is None)
     print(f'Model: {model}')
     print(f'Number of parameters: {sum(p.numel() for p in model.parameters())}')
     

@@ -220,7 +220,8 @@ class TrainBox:
                     "optimizer_state_dict":self._optimizer.state_dict(),
                     "val_loss":val_loss,
                     "val_iou":val_iou,
-                    "scheduler_state_dict":self._scheduler.state_dict() if self._scheduler is not None else None
+                    "scheduler_state_dict":self._scheduler.state_dict() if self._scheduler is not None else None,
+                    "config":self.run_config,   #lets evaluate.py rebuild the right architecture
                 },self.checkpoint_path)
                 print(f"Model saved to {self.checkpoint_path}")
                 epochs_without_improvement=0
