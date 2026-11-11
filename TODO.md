@@ -1,6 +1,6 @@
 # Solar Filaments – To-Do Checklist
 
-_Last updated: 2026-11-11. Each code change gets approval before editing._
+_Last updated: 2026-11-11 (after reading the Overview/Evaluation tab). Each code change gets approval before editing._
 
 ## Dataset facts (Kaggle Data tab + train JSON analysis)
 - **Images:** 2048×2048, 8-bit **grayscale** JPEG (converted from FITS) – do not treat as RGB.
@@ -14,7 +14,10 @@ _Last updated: 2026-11-11. Each code change gets approval before editing._
 - **Categories (chirality):** Left 2,535 / Right 2,590 / Unidentifiable 3,074 / Ambiguous 0. Ground truth for the competition is the segmentation → collapse to one "filament" class.
 - Each annotation also has a `spine` polyline (single connected path; possible auxiliary target).
 - **Test:** 180 unlabeled images, no file overlap with train, but median 1.5 days from the nearest train image (filaments persist across days). Years skewed to 2011–2017.
-- **Metric / submission format:** not on the Data tab → read the Overview/Evaluation tab. Pixel-level (IoU, precision, recall) and per-filament (AP@IoU, hit/miss rate) scores are expected; a public repo suggests Panoptic Quality scored against every annotator copy (unconfirmed).
+- **Metric (Overview tab, updated Aug 7 2026):** leaderboard = **Panoptic Quality (PQ)**, a per-filament score: PQ = Σ IoU(matched pairs) / (#TP + 0.5·#FP + 0.5·#FN). Judging rubric: 70% quantitative (PQ, mean Dice via `torchmetrics.segmentation.DiceScore`, Dice/IoU distributions, **one-to-many / many-to-one** fragmentation and over-merging), 30% qualitative (pipeline description, predicted morphology, code quality); computational efficiency also counts. Organisers: *any PQ > 0.35 is of great value*.
+- **Submission format:** one CSV for the whole test set, **one row per predicted filament**: `filament_id` (`<image name>_<n>`) and `segmentation_rle` (pycocotools RLE *counts* only, masks at full **2048×2048**). Predictions are matched to ground truth by overlap, not by index.
+- **Rules to respect:** inference uses only the test H-alpha images; models *"may not use any other ground-truth metadata for training"* (our crop placement uses the `spine` – ambiguous, see Phase 1). Official self-evaluation notebook: kaggle.com/code/azimahmadzadeh/self-evaluation-notebook.
+- **Final submission (if entered; deadline Nov 15 2026 – not targeted):** 4-page report, public Git repo with `requirements.txt`, a notebook running the whole pipeline, and model **weights in the repo** (current checkpoint 373 MB > GitHub's 100 MB file limit → save weights only / fp16, or Git LFS).
 
 ## Results so far (validation IoU, 1024 resolution, file-grouped split, threshold 0.5)
 | Change | Best val IoU | Commit | Notes |
@@ -53,6 +56,7 @@ Speed on M1 (MPS, batch 4, 4 workers): ~12.5 min/epoch (10.6 train + 1.9 val) �
 - [ ] Replace ImageNet normalisation with dataset mean/std (or per-image / limb-darkening normalisation)
 - [x] Resolution strategy: 256 erases thin filaments → 512–1024 input or random 512 crops from 2048 — 5427174 (2048 → 1024 with area averaging, 512 training crops; validation on whole 1024 image)
 - [ ] Update `annotations.py` viewer: colour each filament separately, option to show all annotator copies side by side
+- [ ] Rule safety: place filament-aware crops from **mask pixels** instead of the `spine` annotation (same effect, uses only segmentation ground truth)
 
 ## Phase 2 – Training that fits the problem
 - [x] BCE + Dice loss for 0.3% foreground — 4f80bcd (`losses.BCEDiceLoss`, Dice over the batch; +0.06 IoU)
@@ -70,13 +74,14 @@ Speed on M1 (MPS, batch 4, 4 workers): ~12.5 min/epoch (10.6 train + 1.9 val) �
 - [ ] _On hold:_ faster training – mixed precision on MPS, or Kaggle GPU (free T4/P100)
 
 ## Phase 3 – Competition deliverable
-- [ ] Read the Overview/Evaluation tab: exact metric (PQ? MIoU?) + submission format (one mask per image or one entry per filament?)
+- [x] Read the Overview/Evaluation tab: exact metric + submission format — PQ, one CSV row per filament with 2048×2048 RLE counts (see Dataset facts)
+- [ ] **Local PQ evaluation on the validation set** (next): per-filament ground truth at 2048, prediction → probability map → upsample to 2048 → threshold → connected components → min-area filter; match predicted/GT filaments (IoU > 0.5), report PQ (+ SQ/RQ), TP/FP/FN, mean Dice, one-to-many / many-to-one counts; score each annotator copy
 - [ ] Inference script for the 180 test images at full resolution (tiling + stitching)
 - [ ] Post-processing into individual filaments: connected components, min-area filter, merge fragments, split touching filaments if needed
 - [ ] Per-filament confidence score (e.g. mean probability inside the component) for AP ranking
-- [ ] Threshold tuning on validation (pixel threshold + min-area)
+- [ ] Threshold tuning on validation (pixel threshold + min-area) – tune for PQ, not pixel IoU
 - [ ] Submission writer
-- [ ] Local implementation of the competition metric
+- [ ] Compare our PQ with the official self-evaluation notebook on the same predictions
 
 ## Phase 4 – CV polish
 - [ ] Pretrained encoder (e.g. segmentation_models_pytorch – needs download approval)
@@ -84,4 +89,5 @@ Speed on M1 (MPS, batch 4, 4 workers): ~12.5 min/epoch (10.6 train + 1.9 val) �
 - [ ] Compare against inter-annotator agreement (reference, not ceiling)
 - [ ] README: problem, data, method, results table, example overlays
 - [ ] requirements.txt / environment file, unit tests for mask creation (incl. an image with many filaments)
+- [ ] Pipeline notebook (load weights → predict → submission CSV); weights small enough for the repo (state_dict only / fp16 or Git LFS)
 - [ ] Ideas: spine as auxiliary target, clDice/skeleton loss for thin structures
