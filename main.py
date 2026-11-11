@@ -40,8 +40,10 @@ if __name__=="__main__":
         lr=0.001,
         lr_decay_factor=0.5,          #halve the learning rate...
         lr_decay_patience=2,          #...when validation loss stops improving for 2 epochs
-        epochs=30,                    #maximum; early stopping usually ends sooner
-        early_stopping_patience=5,    #stop if validation IoU has not improved for 5 epochs
+        lr_min=1e-6,                  #never decay the learning rate below this
+        augment=True,                 #random flips/rotations + brightness/contrast jitter on training crops
+        epochs=100,                   #long run (~21 h on the M1 at ~12.5 min/epoch)
+        early_stopping_patience=15,   #stop only if validation IoU has not improved for 15 epochs
         num_workers=4,                #prepare batches in 4 background processes
     )
 
@@ -62,7 +64,8 @@ if __name__=="__main__":
         resize_to=config["resize_to"],
         crop_size=config["crop_size"],
         img_ids=train_ids,
-        filament_crop_prob=config["filament_crop_prob"]
+        filament_crop_prob=config["filament_crop_prob"],
+        augment=config["augment"]
     )
     val_data=dataset.Dataset(
         image_dir=IMAGE_DIR,
@@ -74,7 +77,7 @@ if __name__=="__main__":
 
     optimizer=torch.optim.Adam(model.parameters(),lr=config["lr"])
     scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,mode="min",
-        factor=config["lr_decay_factor"],patience=config["lr_decay_patience"])
+        factor=config["lr_decay_factor"],patience=config["lr_decay_patience"],min_lr=config["lr_min"])
 
     #one checkpoint per run, named like the MLflow run (date + commit), so earlier models are never overwritten
     commit, dirty = git_commit()

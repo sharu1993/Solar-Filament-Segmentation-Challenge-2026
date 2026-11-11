@@ -20,26 +20,40 @@ def split_by_file(coco, val_fraction=0.2, seed=42):
     val_ids=[i for i in all_ids if coco.imgs[i]['file_name'] in val_files]
     return train_ids, val_ids
 
+def augment_geometric(image, mask):
+    """Same random flip / 90-degree rotation for image and mask (8 possible orientations)."""
+    if random.random()<0.5:
+        image, mask = image.flip(-1), mask.flip(-1)      #left-right
+    if random.random()<0.5:
+        image, mask = image.flip(-2), mask.flip(-2)      #up-down
+    k=random.randrange(4)
+    return image.rot90(k,dims=(-2,-1)), mask.rot90(k,dims=(-2,-1))
+
+def augment_photometric(image, brightness=0.1, contrast=0.2):
+    """Random brightness shift and contrast scaling of a 0..1 image (the mask is unchanged)."""
+    c=1+random.uniform(-contrast,contrast)
+    b=random.uniform(-brightness,brightness)
+    mean=image.mean()
+    return ((image-mean)*c+mean+b).clamp(0,1)
+
 class Dataset(Dataset):
-    def __init__(self, image_dir, annotation_file, resize_to=1024, crop_size=512, img_ids=None, filament_crop_prob=0.8):
+    def __init__(self, image_dir, annotation_file, resize_to=1024, crop_size=512, img_ids=None, filament_crop_prob=0.8, augment=False):
         """
         resize_to: side length the full 2048x2048 image AND mask are shrunk to (2048 -> 1024 = 2x).
         crop_size: side of the random crop taken (same window) from image and mask. None = no crop.
         img_ids: which image ids to use (e.g. from split_by_file). None = all.
         filament_crop_prob: chance that a crop is placed on a filament; otherwise it is placed anywhere.
+        augment: random flips / 90-degree rotations (image and mask together) and brightness/contrast
+                 jitter (image only). Use for training only.
         """
         self.image_dir=image_dir
         self.coco=COCO(annotation_file)
         self.resize_to=resize_to
         self.crop_size=crop_size
         self.filament_crop_prob=filament_crop_prob
+        self.augment=augment
         self.img_ids=list(img_ids) if img_ids is not None else self.coco.getImgIds()
 
-        # Applied after resize + crop
-        self.image_transform = transforms.Compose([
-            transforms.ToTensor(),  # Converts to [C, H, W] and scales to [0,1]
-            transforms.Normalize(mean=[0.485], std=[0.229])  # Optional: normalize for pretrained models
-        ])
 
     def __len__(self):
         return len(self.img_ids)
@@ -66,9 +80,13 @@ class Dataset(Dataset):
             image=TF.crop(image, top, left, self.crop_size, self.crop_size)
             mask=TF.crop(mask, top, left, self.crop_size, self.crop_size)
 
-        image = self.image_transform(image)                                    # Shape: [1, crop, crop]
+        image = TF.to_tensor(image)                                            # [1, crop, crop], values 0..1
         mask = torch.from_numpy((np.array(mask) > 127).astype(np.float32))    # back to 0/1
         mask = mask.unsqueeze(0)                                               # Shape: [1, crop, crop]
+        if self.augment:
+            image, mask = augment_geometric(image, mask)
+            image = augment_photometric(image)
+        image = TF.normalize(image, mean=[0.485], std=[0.229])                 # same normalisation as before
         return image,mask
 
     def choose_crop(self,img_id):
