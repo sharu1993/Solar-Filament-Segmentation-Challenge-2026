@@ -76,6 +76,11 @@ if __name__=="__main__":
     scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,mode="min",
         factor=config["lr_decay_factor"],patience=config["lr_decay_patience"])
 
+    #one checkpoint per run, named like the MLflow run (date + commit), so earlier models are never overwritten
+    commit, dirty = git_commit()
+    run_name=f"{datetime.now():%Y-%m-%d_%H-%M}_{commit}"
+    checkpoint_path=os.path.join("checkpoints",f"{run_name}.pt")
+
     train = TrainBox.TrainBox(
         model=model,
         optimizer=optimizer,
@@ -84,6 +89,7 @@ if __name__=="__main__":
         epochs=config["epochs"],
         early_stopping_patience=config["early_stopping_patience"],
         num_workers=config["num_workers"],
+        checkpoint_path=checkpoint_path,
         train_data=train_data,
         val_data=val_data)
 
@@ -91,10 +97,9 @@ if __name__=="__main__":
 
     #MLflow: fixed location, named experiment, one run per training. The `with` block ends the run
     #properly even on a crash or Ctrl-C (marked FAILED / KILLED instead of left "running").
-    commit, dirty = git_commit()
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT)
-    with mlflow.start_run(run_name=f"{datetime.now():%Y-%m-%d_%H-%M}_{commit}"):
+    with mlflow.start_run(run_name=run_name):
         mlflow.log_params(config)
         mlflow.log_param("model_parameters", sum(p.numel() for p in model.parameters()))
         mlflow.set_tags({"git_commit":commit, "git_uncommitted_changes":dirty})

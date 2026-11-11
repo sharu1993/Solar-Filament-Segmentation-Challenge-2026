@@ -1,4 +1,5 @@
 import copy
+import os
 import time
 import torch
 import torchvision
@@ -23,6 +24,7 @@ class TrainBox:
             epochs = 100,
             early_stopping_patience = None,
             num_workers = 0,
+            checkpoint_path = "best_model.pt",
             mlflow_log:bool=True
     ):
         self._model=model
@@ -33,6 +35,7 @@ class TrainBox:
 
         self.epochs=epochs
         self.mlflow_log=mlflow_log  #False = train without logging anything to MLflow
+        self.checkpoint_path=checkpoint_path  #where the best model of this run is saved
         self.early_stopping_patience=early_stopping_patience  #stop after this many epochs without a better val IoU (None = never)
         self.num_workers=num_workers  #background processes preparing batches while the GPU trains (0 = main process only)
         
@@ -87,6 +90,7 @@ class TrainBox:
                 "scheduler":type(self._scheduler).__name__ if self._scheduler is not None else None,
                 "loss":type(self._criterion).__name__,
                 "device":str(self._device),
+                "checkpoint_path":self.checkpoint_path,
             })
         #training loop
         print(f"Will run for {self.epochs} epoch(s).")
@@ -149,6 +153,7 @@ class TrainBox:
                 self._best_model=copy.deepcopy(self._model)
                 best_val_loss=val_loss
                 best_val_iou=val_iou
+                os.makedirs(os.path.dirname(self.checkpoint_path) or ".",exist_ok=True)
                 torch.save({
                     "epoch":epoch,
                     "model_state_dict":self._model.state_dict(),
@@ -156,8 +161,8 @@ class TrainBox:
                     "val_loss":val_loss,
                     "val_iou":val_iou,
                     "scheduler_state_dict":self._scheduler.state_dict() if self._scheduler is not None else None
-                },"best_model.pt")
-                print(f"Model saved")
+                },self.checkpoint_path)
+                print(f"Model saved to {self.checkpoint_path}")
                 epochs_without_improvement=0
             else:
                 epochs_without_improvement+=1

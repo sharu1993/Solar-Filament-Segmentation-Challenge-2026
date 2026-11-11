@@ -15,7 +15,8 @@ fragmentation) and many-to-one (a prediction touching >1 GT filament = over-merg
 GT filaments touched by >1 piece *before* grouping and size filtering (fragmentation the filter hides).
 
 Usage (from the project folder):
-    python evaluate.py                                # best_model.pt, threshold 0.5, min area 0
+    python evaluate.py                                # newest checkpoint in checkpoints/, threshold 0.5, min area 0
+    python evaluate.py --checkpoint checkpoints/<run name>.pt
     python evaluate.py --threshold 0.4 --close 31 --min-area 250
     python evaluate.py --sweep                        # grid of thresholds x grouping x min areas, best by PQ
     python evaluate.py --limit 10                     # quick check on the first 10 validation images
@@ -28,6 +29,7 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 
 import argparse
+import glob
 import time
 from collections import defaultdict
 
@@ -42,8 +44,14 @@ import unet
 IMAGE_DIR="./MAGFiLO_1.0_Kaggle_2026/train/train_images"
 ANNOTATION_FILE="./MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json"
 SWEEP_THRESHOLDS=[0.2,0.3,0.4,0.5]
-SWEEP_CLOSE=[0,15,31,61]                 #grouping distance in pixels at 2048x2048 (0 = no grouping)
+SWEEP_CLOSE=[0,31,61,91,121]            #grouping distance in pixels at 2048x2048 (0 = no grouping)
 SWEEP_MIN_AREAS=[0,100,250,500,1000]
+
+
+def default_checkpoint():
+    """Newest checkpoint in checkpoints/ (one per training run); falls back to best_model.pt from older runs."""
+    runs=glob.glob("checkpoints/*.pt")
+    return max(runs,key=os.path.getmtime) if runs else "best_model.pt"
 
 
 def load_model(checkpoint, device):
@@ -149,7 +157,7 @@ def summarise(results):
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--checkpoint",default="best_model.pt")
+    ap.add_argument("--checkpoint",default=None,help="default: newest file in checkpoints/, else best_model.pt")
     ap.add_argument("--threshold",type=float,default=0.5)
     ap.add_argument("--close",type=int,default=0,help="group pieces within ~this many pixels (at 2048x2048); 0 = off")
     ap.add_argument("--min-area",type=int,default=0,help="minimum filament size in pixels at 2048x2048")
@@ -176,6 +184,8 @@ def main():
     min_areas=SWEEP_MIN_AREAS if args.sweep else [args.min_area]
     results=defaultdict(list)   #(threshold, close, min_area) -> one result per validation entry
 
+    if args.checkpoint is None:
+        args.checkpoint=default_checkpoint()
     model=load_model(args.checkpoint,device)
     print(f"Evaluating {args.checkpoint} on {len(files)} validation images "
           f"({sum(len(by_file[f]) for f in files)} annotator copies) on {device}")
