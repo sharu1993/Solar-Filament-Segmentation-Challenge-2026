@@ -13,6 +13,7 @@ Matching: a predicted and a ground-truth filament match when IoU > 0.5 (unique b
 Also reported: mean Dice of the whole-image masks, one-to-many (a GT filament touched by >1 prediction =
 fragmentation) and many-to-one (a prediction touching >1 GT filament = over-merging), and 'split(raw)':
 GT filaments touched by >1 piece *before* grouping and size filtering (fragmentation the filter hides).
+For the best setting, recall (share of real filaments matched) is also shown per filament size group.
 
 Usage (from the project folder):
     python evaluate.py                                # newest checkpoint in checkpoints/, threshold 0.5, min area 0
@@ -46,6 +47,9 @@ ANNOTATION_FILE="./MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2
 SWEEP_THRESHOLDS=[0.2,0.3,0.4,0.5]
 SWEEP_CLOSE=[0,31,61,91,121]            #grouping distance in pixels at 2048x2048 (0 = no grouping)
 SWEEP_MIN_AREAS=[0,100,250,500,1000]
+#filament size groups for recall, by ground-truth area in pixels at 2048x2048 (val set: 230 / 698 / 523 / 142 filaments)
+SIZE_EDGES=[500,1500,5000]
+SIZE_NAMES=["<500 px","500-1500 px","1500-5000 px",">=5000 px"]
 
 
 def default_checkpoint():
@@ -122,7 +126,14 @@ def match(gt, n_gt, pred, n_pred):
     overlaps=I>0
     fg_both=int(I.sum())
     fg_sum=int(gt_area.sum()+pred_area.sum())
-    return dict(
+    #recall per size group: how many GT filaments of each size exist, and how many were matched
+    found=matched.any(axis=1)
+    group=np.digitize(gt_area,SIZE_EDGES)
+    by_size={}
+    for g in range(len(SIZE_NAMES)):
+        by_size[f"gt_size{g}"]=int((group==g).sum())
+        by_size[f"found_size{g}"]=int((found&(group==g)).sum())
+    return dict(**by_size,
         tp=tp,
         fp=n_pred-int(matched.any(axis=0).sum()),
         fn=n_gt-int(matched.any(axis=1).sum()),
@@ -152,6 +163,11 @@ def summarise(results):
         gt_per_image=tot["n_gt"]/len(results), pred_per_image=tot["n_pred"]/len(results),
         one_to_many=int(tot["one_to_many"]), many_to_one=int(tot["many_to_one"]), split_raw=int(tot["split_raw"]),
         entries=len(results),
+        recall=tot["tp"]/(tot["tp"]+tot["fn"]) if tot["tp"]+tot["fn"] else 0.0,
+        #(size group, number of GT filaments, number matched, recall)
+        recall_by_size=[(name,int(tot[f"gt_size{g}"]),int(tot[f"found_size{g}"]),
+                         tot[f"found_size{g}"]/tot[f"gt_size{g}"] if tot[f"gt_size{g}"] else 0.0)
+                        for g,name in enumerate(SIZE_NAMES)],
     )
 
 
@@ -222,6 +238,10 @@ def main():
     t,c,a,s=rows[0]
     print(f"\nBest: threshold {t}, grouping {c} px, min area {a} -> PQ {s['PQ']:.3f} (SQ {s['SQ']:.3f} x RQ {s['RQ']:.3f}), "
           f"mean Dice {s['mean_dice']:.3f}, over {s['entries']} annotator copies")
+    print(f"\nRecall by filament size (best setting; all sizes: {s['recall']:.3f})")
+    print(f"{'size':>14} {'filaments':>9} {'found':>6} {'recall':>6}")
+    for name,n,found,rec in s["recall_by_size"]:
+        print(f"{name:>14} {n:>9d} {found:>6d} {rec:>6.3f}" if n else f"{name:>14} {n:>9d} {found:>6d} {'-':>6}")
 
 
 if __name__=="__main__":
