@@ -51,8 +51,9 @@ if __name__=="__main__":
         epochs=80,                    #overnight run: roughly 4-5 min/epoch at 2048 on the M1 -> ~6 h
         early_stopping_patience=None, #off: with cosine the best epochs usually come late, when the LR is small
         num_workers=4,                #prepare batches in 4 background processes
-        model="resnet34_unet",        #"unet" (from scratch) or "resnet34_unet" (ImageNet-pretrained encoder)
-        pretrained=True,              #load ImageNet weights into the encoder (resnet34_unet only)
+        model="resnet34_unet_fullres",   #"unet" (from scratch), "resnet34_unet" (ImageNet-pretrained encoder),
+                                         #"resnet34_unet_fullres" (+ full-resolution skip into the last decoder step)
+        pretrained=True,              #load ImageNet weights into the encoder (resnet34_unet models only)
     )
 
     #--resume checkpoints/<run>_last.pt (or an older best checkpoint <run>.pt): continue that run

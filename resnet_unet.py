@@ -8,6 +8,9 @@ Encoder outputs (for a 512x512 input):
     layer4                 512 ch,  16x16    (1/32)
 The decoder upsamples step by step, joining each encoder output through a skip connection,
 then a last upsampling step brings it back to full resolution.
+With full_res_skip=True, a small conv block also runs on the input image at full resolution
+(16 ch, 512x512) and is joined in that last step, so fine detail (thin filaments, edges, barbs)
+does not have to be reconstructed from half-resolution features.
 """
 import torch
 import torchvision
@@ -34,7 +37,7 @@ class DecoderBlock(torch.nn.Module):
 
 
 class ResNet34UNet(torch.nn.Module):
-    def __init__(self, in_channels=1, out_channels=1, pretrained=True):
+    def __init__(self, in_channels=1, out_channels=1, pretrained=True, full_res_skip=False):
         super().__init__()
         resnet=torchvision.models.resnet34(weights=None)
         if pretrained:
@@ -64,7 +67,9 @@ class ResNet34UNet(torch.nn.Module):
         self.dec3=DecoderBlock(256,128,128)   #1/16 -> 1/8
         self.dec2=DecoderBlock(128,64,64)     #1/8  -> 1/4
         self.dec1=DecoderBlock(64,64,64)      #1/4  -> 1/2 (joins the stem)
-        self.dec0=DecoderBlock(64,0,32)       #1/2  -> full size (no skip at full resolution)
+        #full-resolution skip: two 3x3 convs on the input image itself (no downsampling)
+        self.full=ConvBlock(in_channels,16) if full_res_skip else None
+        self.dec0=DecoderBlock(64,16 if full_res_skip else 0,32)   #1/2 -> full size
         self.head=torch.nn.Conv2d(32,out_channels,kernel_size=1)
 
     def forward(self, x):
@@ -79,7 +84,7 @@ class ResNet34UNet(torch.nn.Module):
         d=self.dec3(d,e2)
         d=self.dec2(d,e1)
         d=self.dec1(d,s)
-        d=self.dec0(d)
+        d=self.dec0(d,self.full(x) if self.full is not None else None)
         return torch.sigmoid(self.head(d))
 
 
@@ -89,4 +94,6 @@ def build_model(name="unet", pretrained=True):
         return unet.UNet(in_channels=1,out_channels=1)
     if name=="resnet34_unet":
         return ResNet34UNet(in_channels=1,out_channels=1,pretrained=pretrained)
+    if name=="resnet34_unet_fullres":
+        return ResNet34UNet(in_channels=1,out_channels=1,pretrained=pretrained,full_res_skip=True)
     raise ValueError(f"Unknown model '{name}'")
