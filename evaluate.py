@@ -7,6 +7,7 @@ Per validation image:
         -> optionally group pieces lying within ~close_size pixels into one filament (only the predicted
            pixels are kept; the gap between them is not filled)
         -> drop filaments smaller than min_area pixels (at 2048 scale)
+        -> optionally drop filaments whose mean probability is below --min-conf
 Ground truth: every annotator copy of the image is scored separately (one instance per annotated filament).
 Matching: a predicted and a ground-truth filament match when IoU > 0.5 (unique by construction, as in PQ).
   PQ = sum(IoU of matches) / (TP + 0.5*FP + 0.5*FN)    SQ = mean IoU of matches    RQ = TP / (TP + 0.5*FP + 0.5*FN)
@@ -33,6 +34,7 @@ Usage (from the project folder):
     python evaluate.py --sweep --load-probs probs/<run name>          # re-score saved maps, no model needed
     python evaluate.py --sweep --load-probs probs/<run A> probs/<run B>  # ensemble: average of two models
     python evaluate.py --sweep --load-probs probs/<run name> --save-overlays overlays/<run name>   # TP/FP/FN pictures
+    python evaluate.py --sweep --min-conf 0 0.9 0.92 0.94   # also try confidence cut-offs (each value multiplies the sweep)
 """
 import os
 #same workaround as main.py: torch and cv2 each load their own OpenMP runtime on macOS
@@ -183,6 +185,20 @@ def drop_small(labels, areas, min_area):
             old.append(i)
             keep[i]=len(old)-1
     return keep[labels], len(old)-1, np.array(old)
+
+
+def mean_conf(pred, n, prob):
+    """Mean probability inside each label 0..n."""
+    return np.bincount(pred.ravel(),weights=prob.ravel(),minlength=n+1)/np.maximum(np.bincount(pred.ravel(),minlength=n+1),1)
+
+
+def drop_unconfident(pred, n, conf, min_conf):
+    """Remove labels whose mean probability (conf, per label 0..n) is below min_conf and renumber the rest 1..m.
+    Also returns the old label of each new label (index 0 = background)."""
+    old=np.concatenate([[0],np.where(conf[1:]>=min_conf)[0]+1])
+    keep=np.zeros(n+1,dtype=np.int32)
+    keep[old]=np.arange(len(old),dtype=np.int32)
+    return keep[pred], len(old)-1, old
 
 
 def match(gt, n_gt, pred, n_pred, gt_zone=None, pred_zone=None, pred_conf=None):
@@ -341,6 +357,8 @@ def main():
     ap.add_argument("--threshold",type=float,default=0.5)
     ap.add_argument("--close",type=int,default=0,help="group pieces within ~this many pixels (at 2048x2048); 0 = off")
     ap.add_argument("--min-area",type=int,default=0,help="minimum filament size in pixels at 2048x2048")
+    ap.add_argument("--min-conf",type=float,nargs="+",default=[0.0],
+                    help="drop filaments with a lower mean probability (0 = off); several values are all tried, also with --sweep")
     ap.add_argument("--sweep",action="store_true",help="try a grid of thresholds, grouping distances and min areas")
     ap.add_argument("--resize-to",type=int,default=None,help="default: from the checkpoint's config (1024 for older checkpoints)")
     ap.add_argument("--tile",type=int,default=None,help="predict in overlapping tiles of this size; default: from the checkpoint's config (none = whole image)")
@@ -425,22 +443,28 @@ def main():
                 label_zone,label_conf=label_stats(labels,len(areas)-1,zone,prob)
                 for a in min_areas:
                     pred,n_pred,old=drop_small(labels,areas,a)
-                    for (gt,n_gt),gz,split in zip(gts,gt_zones,splits):
-                        r=match(gt,n_gt,pred,n_pred,gz,label_zone[old],label_conf[old])
-                        r["split_raw"]=split
-                        results[(t,c,a)].append(r)
+                    for m in args.min_conf:
+                        sel=old
+                        p,n_p=pred,n_pred
+                        if m>0:
+                            p,n_p,kept=drop_unconfident(pred,n_pred,label_conf[old],m)
+                            sel=old[kept]
+                        for (gt,n_gt),gz,split in zip(gts,gt_zones,splits):
+                            r=match(gt,n_gt,p,n_p,gz,label_zone[sel],label_conf[sel])
+                            r["split_raw"]=split
+                            results[(t,c,a,m)].append(r)
         if n%20==0 or n==len(files):
             print(f"  {n}/{len(files)} images, {time.perf_counter()-start:.0f}s")
 
-    rows=sorted(((t,c,a,summarise(r)) for (t,c,a),r in results.items()),key=lambda x:-x[3]["PQ"])
-    print(f"\n{'thresh':>6} {'close':>5} {'min_area':>8} {'PQ':>6} {'SQ':>6} {'RQ':>6} {'PQ/img':>6} {'Dice':>6} "
+    rows=sorted(((t,c,a,m,summarise(r)) for (t,c,a,m),r in results.items()),key=lambda x:-x[4]["PQ"])
+    print(f"\n{'thresh':>6} {'close':>5} {'min_area':>8} {'min_conf':>8} {'PQ':>6} {'SQ':>6} {'RQ':>6} {'PQ/img':>6} {'Dice':>6} "
           f"{'TP':>5} {'FP':>5} {'FN':>5} {'GT/img':>6} {'pred/img':>8} {'1-to-many':>9} {'many-to-1':>9} {'split(raw)':>10}")
-    for t,c,a,s in rows:
-        print(f"{t:>6.2f} {c:>5d} {a:>8d} {s['PQ']:>6.3f} {s['SQ']:>6.3f} {s['RQ']:>6.3f} {s['PQ_mean_per_image']:>6.3f} "
+    for t,c,a,m,s in rows:
+        print(f"{t:>6.2f} {c:>5d} {a:>8d} {m:>8.2f} {s['PQ']:>6.3f} {s['SQ']:>6.3f} {s['RQ']:>6.3f} {s['PQ_mean_per_image']:>6.3f} "
               f"{s['mean_dice']:>6.3f} {s['TP']:>5d} {s['FP']:>5d} {s['FN']:>5d} {s['gt_per_image']:>6.1f} "
               f"{s['pred_per_image']:>8.1f} {s['one_to_many']:>9d} {s['many_to_one']:>9d} {s['split_raw']:>10d}")
-    t,c,a,s=rows[0]
-    print(f"\nBest: threshold {t}, grouping {c} px, min area {a} -> PQ {s['PQ']:.3f} (SQ {s['SQ']:.3f} x RQ {s['RQ']:.3f}), "
+    t,c,a,m,s=rows[0]
+    print(f"\nBest: threshold {t}, grouping {c} px, min area {a}, min confidence {m} -> PQ {s['PQ']:.3f} (SQ {s['SQ']:.3f} x RQ {s['RQ']:.3f}), "
           f"mean Dice {s['mean_dice']:.3f}, over {s['entries']} annotator copies")
     print(f"\nRecall by filament size (best setting; all sizes: {s['recall']:.3f})")
     print(f"{'size':>14} {'filaments':>9} {'found':>6} {'recall':>6}")
@@ -457,13 +481,15 @@ def main():
                           for d in folders],axis=0)
             labels,areas=components(prob>t,c)
             pred,n_pred,_=drop_small(labels,areas,a)
+            if m>0:
+                pred,n_pred,_=drop_unconfident(pred,n_pred,mean_conf(pred,n_pred,prob),m)
             image=cv2.imread(os.path.join(IMAGE_DIR,fname),cv2.IMREAD_GRAYSCALE)
             idxs=by_file[fname]
             for k,i in enumerate(idxs,start=1):
                 gt,n_gt=gt_label_map(coco,val_data.img_ids[i])
                 suffix=f"_a{k}" if len(idxs)>1 else ""
                 save_overlay(os.path.join(args.save_overlays,f"{stem}{suffix}.jpg"),image,gt,n_gt,pred,n_pred,
-                             f"{stem}{suffix}  (threshold {t}, grouping {c} px, min area {a} px)")
+                             f"{stem}{suffix}  (threshold {t}, grouping {c} px, min area {a} px, min confidence {m})")
         print(f"\nOverlays at the best setting written to {args.save_overlays} "
               f"({sum(len(by_file[f]) for f in files)} pictures)")
 
