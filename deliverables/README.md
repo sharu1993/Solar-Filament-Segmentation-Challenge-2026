@@ -55,7 +55,7 @@ Validation set, best post-processing setting per model (threshold / grouping / m
 | + augmentation, longer training (best epoch 26) | 0.346 | 0.652 | 0.532 | 851 / 758 / 742 |
 | + ImageNet ResNet-34 encoder (1024 px) | 0.395 | 0.661 | 0.598 | 996 / 742 / 597 |
 | + 2048 resolution, cosine LR schedule | 0.399 | 0.670 | 0.595 | 1035 / 851 / 558 |
-| + confidence filter (mean probability >= 0.92) | **0.412** | 0.672 | 0.613 | 977 / 615 / 616 |
+| + confidence filter (mean probability >= 0.92) | **0.413** | 0.672 | 0.614 | 977 / 615 / 616 |
 
 Recall by filament size (area at 2048x2048):
 

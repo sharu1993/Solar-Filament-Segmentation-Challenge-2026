@@ -91,7 +91,7 @@ fig.tight_layout(); fig.savefig(f"{OUT}/annotators_vs_model.png",dpi=100); plt.c
 
 # ---- figure 3: validation PQ by step, with the annotator-agreement reference
 steps=[("U-Net, 5 epochs",0.277),("+ augmentation, longer training",0.346),("+ ImageNet ResNet-34 encoder",0.395),
-       ("+ 2048 resolution, cosine LR",0.399),("+ confidence filter (>= 0.92)",0.412)]
+       ("+ 2048 resolution, cosine LR",0.399),("+ confidence filter (>= 0.92)",0.413)]
 fig,ax=plt.subplots(figsize=(8,3.7))
 yy=np.arange(len(steps))[::-1]
 ax.barh(yy,[v for _,v in steps],height=0.55,color=GT)
