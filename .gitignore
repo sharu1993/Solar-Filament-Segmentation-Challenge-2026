@@ -238,3 +238,5 @@ mask_check_real.png
 pretrained/
 # Saved probability maps (evaluate.py --save-probs)
 probs/
+# TP/FP/FN pictures (evaluate.py --save-overlays)
+overlays/

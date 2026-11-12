@@ -19,6 +19,8 @@ overlap with any filament), by size and by position on the disk; recall by posit
 (mean probability) of correct vs false predictions. Disk position comes from a circle fitted to each image.
 Probability maps can be saved once (--save-probs) and re-scored later without the model (--load-probs);
 giving several folders to --load-probs averages them (ensemble).
+--save-overlays writes one picture per annotator copy at the best setting: matched predictions (TP) in blue,
+false positives in red, missed filaments (FN) in yellow dashed outlines.
 
 Usage (from the project folder):
     python evaluate.py                                # newest checkpoint in checkpoints/, threshold 0.5, min area 0
@@ -30,6 +32,7 @@ Usage (from the project folder):
     python evaluate.py --save-probs probs/<run name>  # also save the probability maps (8-bit PNG, gitignored)
     python evaluate.py --sweep --load-probs probs/<run name>          # re-score saved maps, no model needed
     python evaluate.py --sweep --load-probs probs/<run A> probs/<run B>  # ensemble: average of two models
+    python evaluate.py --sweep --load-probs probs/<run name> --save-overlays overlays/<run name>   # TP/FP/FN pictures
 """
 import os
 #same workaround as main.py: torch and cv2 each load their own OpenMP runtime on macOS
@@ -63,6 +66,11 @@ SIZE_NAMES=["<500 px","500-1500 px","1500-5000 px",">=5000 px"]
 #position on the solar disk, as distance from the disk centre / disk radius (99% of filaments stay within 0.95)
 ZONE_EDGES=[0.7,0.9,1.0]
 ZONE_NAMES=["centre <0.7R","0.7-0.9R","limb 0.9-1.0R","off-disk >1R"]
+#overlay colours (BGR for OpenCV): reference palette blue / red / yellow, distinguishable with colour blindness
+OVERLAY_TP=(214,120,42)    #2a78d6 matched prediction
+OVERLAY_FP=(72,73,227)     #e34948 false positive
+OVERLAY_FN=(0,161,237)     #eda100 missed filament (dashed)
+OVERLAY_SIZE=1024
 FP_TYPES=[("fp_fragment","fragment of a found filament"),("fp_poor","overlaps a missed filament (IoU <= 0.5)"),
           ("fp_none","no overlap with any filament")]
 
@@ -231,6 +239,44 @@ def match(gt, n_gt, pred, n_pred, gt_zone=None, pred_zone=None, pred_conf=None):
     )
 
 
+def outcomes(gt, n_gt, pred, n_pred):
+    """Which predictions matched a filament (IoU > 0.5) and which filaments were found: two boolean arrays."""
+    inter=np.bincount((gt.astype(np.int64)*(n_pred+1)+pred).ravel(),
+                      minlength=(n_gt+1)*(n_pred+1)).reshape(n_gt+1,n_pred+1)
+    I=inter[1:,1:]
+    U=inter.sum(axis=1)[1:,None]+inter.sum(axis=0)[None,1:]-I
+    matched=np.where(U>0,I/np.maximum(U,1),0.0)>0.5
+    return matched.any(axis=0), matched.any(axis=1)
+
+
+def draw_outlines(canvas, labels, ids, color, scale, dashed=False):
+    """Outline the given labels of a full-size label map on a (smaller) canvas."""
+    for k in ids:
+        contours,_=cv2.findContours((labels==k).astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_NONE)
+        for c in contours:
+            pts=np.round(c[:,0,:]*scale).astype(np.int32)
+            if not dashed:
+                cv2.polylines(canvas,[pts],True,color,2,cv2.LINE_AA)
+                continue
+            for i in range(0,len(pts),16):   #dash: draw 8 contour points, skip 8 (in full-size pixels)
+                cv2.polylines(canvas,[pts[i:i+9]],False,color,2,cv2.LINE_AA)
+
+
+def save_overlay(path, image, gt, n_gt, pred, n_pred, title):
+    """Picture of one annotator copy: TP predictions blue, FP red, missed filaments yellow dashed."""
+    tp,found=outcomes(gt,n_gt,pred,n_pred)
+    scale=OVERLAY_SIZE/image.shape[1]
+    canvas=cv2.cvtColor(cv2.resize(image,(OVERLAY_SIZE,OVERLAY_SIZE),interpolation=cv2.INTER_AREA),cv2.COLOR_GRAY2BGR)
+    draw_outlines(canvas,gt,[k+1 for k in np.where(~found)[0]],OVERLAY_FN,scale,dashed=True)
+    draw_outlines(canvas,pred,[k+1 for k in np.where(tp)[0]],OVERLAY_TP,scale)
+    draw_outlines(canvas,pred,[k+1 for k in np.where(~tp)[0]],OVERLAY_FP,scale)
+    lines=[title,f"TP {int(tp.sum())} (blue)   FP {int((~tp).sum())} (red)   FN {int((~found).sum())} (yellow, dashed)"]
+    cv2.rectangle(canvas,(0,0),(OVERLAY_SIZE,52),(0,0,0),-1)
+    for i,text in enumerate(lines):
+        cv2.putText(canvas,text,(10,20+22*i),cv2.FONT_HERSHEY_SIMPLEX,0.55,(255,255,255),1,cv2.LINE_AA)
+    cv2.imwrite(path,canvas,[cv2.IMWRITE_JPEG_QUALITY,90])
+
+
 def summarise(results):
     """Pooled PQ/SQ/RQ over all validation entries, plus per-image means."""
     tot=defaultdict(float)
@@ -305,6 +351,7 @@ def main():
     ap.add_argument("--tta",action="store_true",help="average predictions over the 8 flips/rotations (8x slower prediction)")
     ap.add_argument("--save-probs",default=None,help="folder to save each image's probability map in (8-bit PNG, 2048x2048)")
     ap.add_argument("--load-probs",nargs="+",default=None,help="use saved probability maps instead of the model; several folders are averaged")
+    ap.add_argument("--save-overlays",default=None,help="folder for TP/FP/FN pictures at the best setting (one per annotator copy)")
     args=ap.parse_args()
 
     device=torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
@@ -314,6 +361,10 @@ def main():
         if args.checkpoint is None:
             args.checkpoint=default_checkpoint()
         model,config=load_model(args.checkpoint,device)
+    if args.save_overlays and not args.load_probs and not args.save_probs:
+        #overlays are drawn in a second pass once the best setting is known: keep the maps so the model runs only once
+        args.save_probs=os.path.join(args.save_overlays,"probs")
+        print(f"--save-overlays: saving probability maps to {args.save_probs} for the drawing pass")
     if args.save_probs:
         os.makedirs(args.save_probs,exist_ok=True)
     #resolution and tiling as in training, unless given on the command line
@@ -396,6 +447,25 @@ def main():
     for name,n,found,rec in s["recall_by_size"]:
         print(f"{name:>14} {n:>9d} {found:>6d} {rec:>6.3f}" if n else f"{name:>14} {n:>9d} {found:>6d} {'-':>6}")
     print_breakdown(s)
+
+    if args.save_overlays:
+        os.makedirs(args.save_overlays,exist_ok=True)
+        folders=args.load_probs or [args.save_probs]
+        for fname in files:
+            stem=os.path.splitext(fname)[0]
+            prob=np.mean([cv2.imread(os.path.join(d,f"{stem}.png"),cv2.IMREAD_GRAYSCALE).astype(np.float32)/255
+                          for d in folders],axis=0)
+            labels,areas=components(prob>t,c)
+            pred,n_pred,_=drop_small(labels,areas,a)
+            image=cv2.imread(os.path.join(IMAGE_DIR,fname),cv2.IMREAD_GRAYSCALE)
+            idxs=by_file[fname]
+            for k,i in enumerate(idxs,start=1):
+                gt,n_gt=gt_label_map(coco,val_data.img_ids[i])
+                suffix=f"_a{k}" if len(idxs)>1 else ""
+                save_overlay(os.path.join(args.save_overlays,f"{stem}{suffix}.jpg"),image,gt,n_gt,pred,n_pred,
+                             f"{stem}{suffix}  (threshold {t}, grouping {c} px, min area {a} px)")
+        print(f"\nOverlays at the best setting written to {args.save_overlays} "
+              f"({sum(len(by_file[f]) for f in files)} pictures)")
 
 
 if __name__=="__main__":
