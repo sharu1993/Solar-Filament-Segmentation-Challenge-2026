@@ -190,10 +190,16 @@ class TrainBox:
             intersection=0
             union=0
 
+            prev_images,prev_outputs=None,None
             with torch.no_grad():
                 for images,masks in self._validloader:
                     images,masks=images.to(self._device),masks.to(self._device)
-                    outputs=tiling.predict_tiled(self._model,images,self.val_tile_size,self.tile_overlap)
+                    #annotator copies of the same image come one after another: predict once, score every copy
+                    if prev_images is not None and torch.equal(images,prev_images):
+                        outputs=prev_outputs
+                    else:
+                        outputs=tiling.predict_tiled(self._model,images,self.val_tile_size,self.tile_overlap)
+                        prev_images,prev_outputs=images,outputs
                     loss=self._criterion(outputs,masks)
                     val_loss+=loss.item()
                     #pixel IoU over the whole validation set (prediction = probability > 0.5)
@@ -208,9 +214,11 @@ class TrainBox:
             
             val_time=time.perf_counter()-epoch_start-train_time
 
-            #pass validation loss to scheduler
-            if self._scheduler is not None:
+            #update the learning rate: plateau scheduling needs the validation loss, epoch-based schedules (cosine) do not
+            if isinstance(self._scheduler,torch.optim.lr_scheduler.ReduceLROnPlateau):
                 self._scheduler.step(val_loss)
+            elif self._scheduler is not None:
+                self._scheduler.step()
 
             print(f"Epoch {epoch+1}/{self.epochs}: Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Validation IoU: {val_iou:.4f}")
             #save model with improving validation IoU

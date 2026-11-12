@@ -41,12 +41,15 @@ if __name__=="__main__":
         val_fraction=0.2,
         split_seed=42,
         lr=0.001,
-        lr_decay_factor=0.5,          #halve the learning rate...
+        lr_schedule="cosine",         #"cosine": short warm-up, then a smooth decay to lr_min over all epochs
+                                      #"plateau": halve the LR when validation loss stalls (earlier runs)
+        warmup_epochs=2,              #cosine only: LR rises from 10% to 100% over the first epochs
+        lr_decay_factor=0.5,          #plateau only: halve the learning rate...
         lr_decay_patience=2,          #...when validation loss stops improving for 2 epochs
         lr_min=1e-6,                  #never decay the learning rate below this
         augment=True,                 #random flips/rotations + brightness/contrast jitter on training crops
-        epochs=100,                   #long run (~21 h on the M1 at ~12.5 min/epoch)
-        early_stopping_patience=15,   #stop only if validation IoU has not improved for 15 epochs
+        epochs=80,                    #overnight run: roughly 4-5 min/epoch at 2048 on the M1 -> ~6 h
+        early_stopping_patience=None, #off: with cosine the best epochs usually come late, when the LR is small
         num_workers=4,                #prepare batches in 4 background processes
         model="resnet34_unet",        #"unet" (from scratch) or "resnet34_unet" (ImageNet-pretrained encoder)
         pretrained=True,              #load ImageNet weights into the encoder (resnet34_unet only)
@@ -94,8 +97,14 @@ if __name__=="__main__":
     )
 
     optimizer=torch.optim.Adam(model.parameters(),lr=config["lr"])
-    scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,mode="min",
-        factor=config["lr_decay_factor"],patience=config["lr_decay_patience"],min_lr=config["lr_min"])
+    if config.get("lr_schedule","plateau")=="cosine":
+        warmup=torch.optim.lr_scheduler.LinearLR(optimizer,start_factor=0.1,total_iters=config["warmup_epochs"])
+        cosine=torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
+            T_max=config["epochs"]-config["warmup_epochs"],eta_min=config["lr_min"])
+        scheduler=torch.optim.lr_scheduler.SequentialLR(optimizer,[warmup,cosine],milestones=[config["warmup_epochs"]])
+    else:
+        scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,mode="min",
+            factor=config["lr_decay_factor"],patience=config["lr_decay_patience"],min_lr=config["lr_min"])
 
     #one checkpoint per run, named like the MLflow run (date + commit), so earlier models are never overwritten
     commit, dirty = git_commit()
