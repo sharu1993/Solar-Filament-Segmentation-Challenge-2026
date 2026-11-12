@@ -1,0 +1,10 @@
+# Python 3.10+. Versions are the ones this project was developed and tested with;
+# on Apple Silicon, install the standard macOS torch/torchvision wheels to use the GPU (MPS).
+torch>=2.1
+torchvision>=0.16
+numpy>=1.24
+opencv-python>=4.8
+Pillow>=10.0
+pycocotools>=2.0.7
+matplotlib>=3.7
+mlflow>=2.9

@@ -234,3 +234,9 @@ mask_check_real.png
 
 # Model checkpoints
 *.pt
+# Downloaded pretrained encoder weights
+pretrained/
+# Saved probability maps (evaluate.py --save-probs)
+probs/
+# TP/FP/FN pictures (evaluate.py --save-overlays)
+overlays/
