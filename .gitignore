@@ -236,3 +236,5 @@ mask_check_real.png
 *.pt
 # Downloaded pretrained encoder weights
 pretrained/
+# Saved probability maps (evaluate.py --save-probs)
+probs/
