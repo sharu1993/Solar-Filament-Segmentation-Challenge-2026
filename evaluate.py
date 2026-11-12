@@ -21,7 +21,8 @@ overlap with any filament), by size and by position on the disk; recall by posit
 Probability maps can be saved once (--save-probs) and re-scored later without the model (--load-probs);
 giving several folders to --load-probs averages them (ensemble).
 --save-overlays writes one picture per annotator copy at the best setting: matched predictions (TP) in blue,
-false positives in red, missed filaments (FN) in yellow dashed outlines.
+false positives in red, missed filaments (FN) in yellow dashed outlines; plus a matching <name>_gt.jpg with
+that annotator's filaments in green, for side-by-side comparison.
 
 Usage (from the project folder):
     python evaluate.py                                # newest checkpoint in checkpoints/, threshold 0.5, min area 0
@@ -72,6 +73,7 @@ ZONE_NAMES=["centre <0.7R","0.7-0.9R","limb 0.9-1.0R","off-disk >1R"]
 OVERLAY_TP=(214,120,42)    #2a78d6 matched prediction
 OVERLAY_FP=(72,73,227)     #e34948 false positive
 OVERLAY_FN=(0,161,237)     #eda100 missed filament (dashed)
+OVERLAY_GT=(122,175,27)    #1baf7a ground truth (in the separate _gt picture)
 OVERLAY_SIZE=1024
 FP_TYPES=[("fp_fragment","fragment of a found filament"),("fp_poor","overlaps a missed filament (IoU <= 0.5)"),
           ("fp_none","no overlap with any filament")]
@@ -278,18 +280,31 @@ def draw_outlines(canvas, labels, ids, color, scale, dashed=False):
                 cv2.polylines(canvas,[pts[i:i+9]],False,color,2,cv2.LINE_AA)
 
 
+def overlay_canvas(image, header):
+    """Image shrunk to OVERLAY_SIZE as a colour canvas, with a black header box of text lines. Returns (canvas, scale)."""
+    scale=OVERLAY_SIZE/image.shape[1]
+    canvas=cv2.cvtColor(cv2.resize(image,(OVERLAY_SIZE,OVERLAY_SIZE),interpolation=cv2.INTER_AREA),cv2.COLOR_GRAY2BGR)
+    cv2.rectangle(canvas,(0,0),(OVERLAY_SIZE,52),(0,0,0),-1)
+    for i,text in enumerate(header):
+        cv2.putText(canvas,text,(10,20+22*i),cv2.FONT_HERSHEY_SIMPLEX,0.55,(255,255,255),1,cv2.LINE_AA)
+    return canvas, scale
+
+
+def save_gt_picture(path, image, gt, n_gt, title):
+    """Ground truth of one annotator copy (green outlines), to compare with its overlay picture."""
+    canvas,scale=overlay_canvas(image,[title,f"Ground truth: {n_gt} annotated filaments (green)"])
+    draw_outlines(canvas,gt,range(1,n_gt+1),OVERLAY_GT,scale)
+    cv2.imwrite(path,canvas,[cv2.IMWRITE_JPEG_QUALITY,90])
+
+
 def save_overlay(path, image, gt, n_gt, pred, n_pred, title):
     """Picture of one annotator copy: TP predictions blue, FP red, missed filaments yellow dashed."""
     tp,found=outcomes(gt,n_gt,pred,n_pred)
-    scale=OVERLAY_SIZE/image.shape[1]
-    canvas=cv2.cvtColor(cv2.resize(image,(OVERLAY_SIZE,OVERLAY_SIZE),interpolation=cv2.INTER_AREA),cv2.COLOR_GRAY2BGR)
+    canvas,scale=overlay_canvas(image,[title,f"TP {int(tp.sum())} (blue)   FP {int((~tp).sum())} (red)   "
+                                             f"FN {int((~found).sum())} (yellow, dashed)"])
     draw_outlines(canvas,gt,[k+1 for k in np.where(~found)[0]],OVERLAY_FN,scale,dashed=True)
     draw_outlines(canvas,pred,[k+1 for k in np.where(tp)[0]],OVERLAY_TP,scale)
     draw_outlines(canvas,pred,[k+1 for k in np.where(~tp)[0]],OVERLAY_FP,scale)
-    lines=[title,f"TP {int(tp.sum())} (blue)   FP {int((~tp).sum())} (red)   FN {int((~found).sum())} (yellow, dashed)"]
-    cv2.rectangle(canvas,(0,0),(OVERLAY_SIZE,52),(0,0,0),-1)
-    for i,text in enumerate(lines):
-        cv2.putText(canvas,text,(10,20+22*i),cv2.FONT_HERSHEY_SIMPLEX,0.55,(255,255,255),1,cv2.LINE_AA)
     cv2.imwrite(path,canvas,[cv2.IMWRITE_JPEG_QUALITY,90])
 
 
@@ -490,8 +505,11 @@ def main():
                 suffix=f"_a{k}" if len(idxs)>1 else ""
                 save_overlay(os.path.join(args.save_overlays,f"{stem}{suffix}.jpg"),image,gt,n_gt,pred,n_pred,
                              f"{stem}{suffix}  (threshold {t}, grouping {c} px, min area {a} px, min confidence {m})")
+                annotator=val_data.img_ids[i].split("-",1)[0]   #annotation batch id, e.g. 050103
+                save_gt_picture(os.path.join(args.save_overlays,f"{stem}{suffix}_gt.jpg"),image,gt,n_gt,
+                                f"{stem}{suffix}  (annotation set {annotator}, copy {k} of {len(idxs)})")
         print(f"\nOverlays at the best setting written to {args.save_overlays} "
-              f"({sum(len(by_file[f]) for f in files)} pictures)")
+              f"({sum(len(by_file[f]) for f in files)} pictures, each with a matching _gt picture)")
 
 
 if __name__=="__main__":
