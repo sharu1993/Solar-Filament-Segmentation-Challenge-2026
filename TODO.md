@@ -1,6 +1,6 @@
 # Solar Filaments – To-Do Checklist
 
-_Last updated: 2026-11-11 (after reading the Overview/Evaluation tab). Each code change gets approval before editing._
+_Last updated: 2026-11-11 (after the ResNet-34 run and its PQ evaluation). Each code change gets approval before editing._
 
 ## Dataset facts (Kaggle Data tab + train JSON analysis)
 - **Images:** 2048×2048, 8-bit **grayscale** JPEG (converted from FITS) – do not treat as RGB.
@@ -26,11 +26,22 @@ _Last updated: 2026-11-11 (after reading the Overview/Evaluation tab). Each code
 | + BCE + Dice loss | 0.450 | 4f80bcd | stopped at epoch 8, still rising |
 | + filament-aware crops | **0.493** | 2332271 | best at epoch 13 (0.464 at epoch 8 vs 0.450) |
 | same setup, MLflow run `2026-11-10_06-01_7dd4d8b` | 0.445 | 7dd4d8b | stopped at epoch 5 |
+| + augmentation (flips/rot90, brightness/contrast), run `2026-11-11_06-06_e82f99f` | 0.516 | e82f99f | best at epoch 26; levelled off from ~epoch 14; stopped at 28 (VS Code restart) |
+| + **ImageNet-pretrained ResNet-34 encoder**, run `2026-11-11_18-34_d1b3d7f` | **0.536** | d1b3d7f | passed 0.516 at epoch 16; best at epoch 47; stopped manually at 50 |
 
-Speed on M1 (MPS, batch 4, 4 workers): ~12.5 min/epoch (10.6 train + 1.9 val) – GPU-bound, not data-bound.
+Speed on M1 (MPS, batch 4, 4 workers): plain U-Net ~12.9 min/epoch; ResNet-34 U-Net **~2.8 min/epoch** (24.5M vs 31.0M parameters).
+LR schedule (ReduceLROnPlateau, patience 2) halves the LR every ~4 epochs: both runs reach ~6e-5 by epoch 25–28 and then barely improve. Train and val loss stay close (no overfitting).
 
-**Panoptic Quality** (`evaluate.py --sweep`, all 141 val images / 217 annotator copies, full 2048 resolution).
-Model: `best_model.pt` from the interrupted run `2026-11-10_06-01_7dd4d8b` (epoch 5, val IoU 0.445 – not the best model so far).
+**Panoptic Quality by model** (`evaluate.py --sweep`, all 141 val images / 217 annotator copies, full 2048 resolution).
+| Model (best checkpoint) | Best setting (thr / grouping / min area) | PQ | SQ | RQ | TP / FP / FN | split GT (1-to-many) | recall ≥5000 px |
+|---|---|---|---|---|---|---|---|
+| U-Net, 5 epochs (7dd4d8b) | 0.4 / 61 / 500 | 0.277 | 0.633 | 0.437 | 680 / 839 / 913 | – | – |
+| U-Net + augmentation (e82f99f, epoch 26) | 0.5 / 31 / 500 | 0.346 | 0.652 | 0.532 | 851 / 758 / 742 | 125 | 0.49 |
+| **ResNet-34 U-Net (d1b3d7f, epoch 47)** | 0.5 / 31 / 250 | **0.395** | 0.661 | 0.598 | 996 / 742 / 597 | 106 | 0.63 |
+
+Same setting for both later models (0.5 / 31 / 500): FP 758 → 553, split GT 125 → 79, PQ 0.346 → 0.395. The pretrained encoder keeps long filaments in one piece. Misses (FN) now cost more than false positives. Top settings tie within 0.003 → fix 0.5 / 31 / 250 from now on.
+
+Post-processing detail for the first model (7dd4d8b, epoch 5):
 | Post-processing (threshold / grouping px / min area px) | PQ | SQ | RQ | TP / FP / FN | pred per image (GT 7.3) |
 |---|---|---|---|---|---|
 | 0.5 / 0 / 0 (none) | 0.173 | 0.639 | 0.271 | 696 / 2849 / 897 | 16.3 |
@@ -54,7 +65,7 @@ Findings: matched filaments are outlined reasonably (SQ ~0.63) but only 43% of r
 ## Phase 1 – Data correctness
 - [x] Build masks at 2048×2048 (from `coco.imgs[id]` height/width), then resize/crop — done in 5427174 (resize to 1024 + 512 crop; verified with check_masks.py)
 - [x] Rasterise **every** filament of the image and merge them into one mask (current `frPyObjects` + `.squeeze(-1)` path is fragile; use `coco.annToMask` or `cv2.fillPoly` per filament, OR-combined) — done in 5427174 (coco.annToMask)
-- [ ] Also keep an **instance map** (filament id per pixel) alongside the binary mask – needed for per-filament metrics
+- [x] Also keep an **instance map** (filament id per pixel) alongside the binary mask – needed for per-filament metrics — 7bb0d4c (`evaluate.gt_label_map`, built at evaluation time)
 - [x] Training samples: keep each annotator copy as its own sample (allowed by Kaggle) – baseline approach — already the case: dataset.py uses every image entry (coco.getImgIds)
 - [ ] _Optional later:_ label fusion across copies (union / majority vote / soft label = fraction of annotators; match filaments by IoU first) and compare against the baseline
 - [x] Seeded train/val split **grouped by file_name** (all copies of an image on the same side) — 623ae65 (80/20, seed 42: 937 / 217 entries, 566 / 141 files)
@@ -73,31 +84,38 @@ Findings: matched filaments are outlined reasonably (SQ ~0.63) but only 43% of r
 - [ ] _Optional:_ output logits (remove sigmoid) + `BCEWithLogitsLoss` – more numerically stable, needed for mixed precision
 - [ ] Watch small filaments: whole-image Dice is dominated by large ones → consider per-filament weighting or boundary/clDice terms later
 - [ ] Validation metrics, pixel-level: IoU done (afd12f9); still missing Dice, precision, recall; `eval()` still uses argmax "accuracy" (dead code)
-- [ ] Validation metrics, **per-filament**: connected components → match to GT filaments by IoU → hit rate, miss rate, false positives, AP@IoU, split by filament size
-- [ ] Augmentations: rotations/flips, brightness/contrast, (disk masking)
+- [x] Validation metrics, **per-filament**: connected components → match to GT filaments by IoU → hit rate, miss rate, false positives, split by filament size — 7bb0d4c, 5fa7091 (`evaluate.py`; AP@IoU not done)
+- [x] Augmentations: rotations/flips, brightness/contrast — e82f99f (+0.02 IoU; disk masking not done)
 - [x] MLflow: `set_experiment` / `start_run`, log params + config — 7dd4d8b (`mlflow.db` in project folder, experiment `filament-segmentation`, git commit tags, per-epoch metrics incl. timing)
 - [x] Config in one place — 7dd4d8b (`config` dict in main.py, logged to MLflow)
 - [ ] Fixed seeds for training (torch / random) so runs are reproducible – only the split is seeded now
 - [x] Keep best model by validation IoU — 623ae65
 - [x] Early stopping (patience 5, max 30 epochs) + parallel data loading (4 workers) — 8b027f5
 - [x] Per-epoch timing (train / validation / total, average, time left) — 87aef99
+- [x] Resume from checkpoint (`_last.pt` every epoch, `main.py --resume`, same MLflow run) — 8348da1
+- [ ] **LR schedule:** slower decay (patience 4) or cosine schedule – the LR currently runs down within ~25 epochs
 - [ ] _On hold:_ faster training – mixed precision on MPS, or Kaggle GPU (free T4/P100)
 
 ## Phase 3 – Competition deliverable
 - [x] Read the Overview/Evaluation tab: exact metric + submission format — PQ, one CSV row per filament with 2048×2048 RLE counts (see Dataset facts)
 - [x] **Local PQ evaluation on the validation set** — 7bb0d4c, 0658881 (`evaluate.py`: upsample to 2048, threshold, connected components, grouping, min-area filter; PQ/SQ/RQ, TP/FP/FN, Dice, one-to-many / many-to-one / raw splits; `--sweep`)
-- [ ] One checkpoint per training run (`checkpoints/<run name>.pt`) so good models are not overwritten; `evaluate.py` defaults to the newest
-- [ ] Full uninterrupted training run → re-run `evaluate.py --sweep` on its checkpoint
-- [ ] Post-processing experiments to raise RQ: grow each detected filament to its full extent (dilation by a few px; hysteresis on the probability map; intensity-based region growing into dark pixels); larger grouping distances (91, 121 px)
+- [x] One checkpoint per training run (`checkpoints/<run name>.pt`) so good models are not overwritten; `evaluate.py` defaults to the newest — 7e99e94
+- [x] Longer training run → re-run `evaluate.py --sweep` on its checkpoint — e82f99f (PQ 0.346), d1b3d7f (PQ 0.395)
+- [ ] **Test-time augmentation** in `evaluate.py`: average predictions over flips / rot90 (no training needed)
+- [ ] Save probability maps once (`--save-probs`) so post-processing experiments don't re-run the model
+- [ ] Error breakdown: FPs as fragment of a matched filament / poor outline / no overlap; FNs by size and position on the disk
+- [ ] Small filaments (<500 px, recall 0.44): they are halved by the 2048 → 1024 resize → try higher resolution or larger crops
+- [ ] Post-processing experiments to raise RQ: grow each detected filament to its full extent (dilation by a few px; hysteresis on the probability map; intensity-based region growing into dark pixels); larger grouping distances (91, 121 px) — tried: larger grouping merges neighbours as much as it fixes splits → join fragments only end to end along the filament direction
 - [ ] Inference script for the 180 test images at full resolution (tiling + stitching)
 - [ ] Post-processing into individual filaments: connected components, min-area filter, merge fragments, split touching filaments if needed
 - [ ] Per-filament confidence score (e.g. mean probability inside the component) for AP ranking
-- [ ] Threshold tuning on validation (pixel threshold + min-area) – tune for PQ, not pixel IoU — first sweep done (best 0.4 / 61 / 500); redo for each new model
+- [ ] Threshold tuning on validation (pixel threshold + min-area) – tune for PQ, not pixel IoU — sweeps done for each model; settings now stable (0.5 / 31 / 250)
 - [ ] Submission writer
 - [ ] Compare our PQ with the official self-evaluation notebook on the same predictions
 
 ## Phase 4 – CV polish
-- [ ] Pretrained encoder (e.g. segmentation_models_pytorch – needs download approval)
+- [x] Pretrained encoder — d1b3d7f (torchvision ResNet-34 + own U-Net decoder, weights in `pretrained/`; PQ 0.346 → 0.395)
+- [ ] Other encoders (ResNet-18 / 50, EfficientNet, ConvNeXt) – one change at a time, for an ablation table
 - [ ] If connected components can't separate filaments well: compare an instance model (e.g. Mask R-CNN / YOLO-seg)
 - [ ] Compare against inter-annotator agreement (reference, not ceiling)
 - [ ] README: problem, data, method, results table, example overlays
@@ -105,3 +123,8 @@ Findings: matched filaments are outlined reasonably (SQ ~0.63) but only 43% of r
 - [ ] Pipeline notebook (load weights → predict → submission CSV); weights small enough for the repo (state_dict only / fp16 or Git LFS)
 - [ ] Environment cleanup: only one OpenMP runtime (torch + OpenCV from the same source), then drop the `KMP_DUPLICATE_LIB_OK` workaround in main.py / evaluate.py
 - [ ] Ideas: spine as auxiliary target, clDice/skeleton loss for thin structures
+
+## Phase 5 – Solar-specific pretraining (later)
+- [ ] Pilot: continue pretraining the ImageNet ResNet-34 on ~2–5k unlabelled GONG H-alpha images (masked-image modelling), then the same fine-tuning recipe (needs download approval; exclude validation dates and nearby hours)
+- [ ] Compare random vs ImageNet vs ImageNet + GONG pretraining on IoU and PQ
+- [ ] If it helps: scale up (more images, cloud GPU) and/or pseudo-labelling of unlabelled GONG images
