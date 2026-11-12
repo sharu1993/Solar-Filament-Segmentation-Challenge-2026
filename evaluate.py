@@ -2,7 +2,7 @@
 Validation evaluation in the competition's terms: Panoptic Quality (PQ), scored per filament.
 
 Per validation image:
-  model -> probability map (resize_to x resize_to) -> upsample to the original 2048x2048
+  model (optionally averaged over the 8 flips/rotations with --tta) -> probability map (resize_to x resize_to) -> upsample to the original 2048x2048
         -> threshold -> connected components (each component = one predicted filament)
         -> optionally group pieces lying within ~close_size pixels into one filament (only the predicted
            pixels are kept; the gap between them is not filled)
@@ -21,6 +21,7 @@ Usage (from the project folder):
     python evaluate.py --threshold 0.4 --close 31 --min-area 250
     python evaluate.py --sweep                        # grid of thresholds x grouping x min areas, best by PQ
     python evaluate.py --limit 10                     # quick check on the first 10 validation images
+    python evaluate.py --sweep --tta                  # test-time augmentation: average of 8 flipped/rotated predictions
 """
 import os
 #same workaround as main.py: torch and cv2 each load their own OpenMP runtime on macOS
@@ -66,6 +67,24 @@ def load_model(checkpoint, device):
     model=resnet_unet.build_model(config.get("model","unet"),pretrained=False)   #weights come from the checkpoint
     model.load_state_dict(state["model_state_dict"] if "model_state_dict" in state else state)
     return model.to(device).eval()
+
+
+def predict(model, image, device, tta=False):
+    """Probability map for one image (1, H, W). With tta, the model sees the image in all 8 orientations
+    (4 rotations x mirrored or not, the same set used for training augmentation); each prediction is turned
+    back to the original orientation and the 8 are averaged."""
+    x=image.unsqueeze(0).to(device)
+    with torch.no_grad():
+        if not tta:
+            return model(x)[0,0].float().cpu().numpy()
+        total=torch.zeros_like(x[:, :1])
+        for mirror in (False,True):
+            xm=x.flip(-1) if mirror else x
+            for k in range(4):
+                p=model(torch.rot90(xm,k,dims=(-2,-1)))
+                p=torch.rot90(p,-k,dims=(-2,-1))   #undo the rotation...
+                total+=p.flip(-1) if mirror else p #...then the mirroring
+        return (total/8)[0,0].float().cpu().numpy()
 
 
 def gt_label_map(coco, img_id):
@@ -185,6 +204,7 @@ def main():
     ap.add_argument("--val-fraction",type=float,default=0.2,help="must match training")
     ap.add_argument("--split-seed",type=int,default=42,help="must match training")
     ap.add_argument("--limit",type=int,default=None,help="only the first N validation image files")
+    ap.add_argument("--tta",action="store_true",help="average predictions over the 8 flips/rotations (8x slower prediction)")
     args=ap.parse_args()
 
     device=torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
@@ -207,13 +227,13 @@ def main():
         args.checkpoint=default_checkpoint()
     model=load_model(args.checkpoint,device)
     print(f"Evaluating {args.checkpoint} on {len(files)} validation images "
-          f"({sum(len(by_file[f]) for f in files)} annotator copies) on {device}")
+          f"({sum(len(by_file[f]) for f in files)} annotator copies) on {device}, "
+          f"TTA {'on (8 orientations)' if args.tta else 'off'}")
     start=time.perf_counter()
     for n,fname in enumerate(files,start=1):
         idxs=by_file[fname]
         image,_=val_data[idxs[0]]
-        with torch.no_grad():
-            prob=model(image.unsqueeze(0).to(device))[0,0].float().cpu().numpy()
+        prob=predict(model,image,device,args.tta)
         gts=[gt_label_map(coco,val_data.img_ids[i]) for i in idxs]
         h,w=gts[0][0].shape
         prob=cv2.resize(prob,(w,h),interpolation=cv2.INTER_LINEAR)   #back to full resolution
