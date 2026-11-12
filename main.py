@@ -51,6 +51,7 @@ if __name__=="__main__":
         epochs=80,                    #overnight run: roughly 4-5 min/epoch at 2048 on the M1 -> ~6 h
         early_stopping_patience=None, #off: with cosine the best epochs usually come late, when the LR is small
         num_workers=4,                #prepare batches in 4 background processes
+        preprocess="local",           #limb darkening + local background divided out, per-image standardised (None = raw)
         model="resnet34_unet_fullres",   #"unet" (from scratch), "resnet34_unet" (ImageNet-pretrained encoder),
                                          #"resnet34_unet_fullres" (+ full-resolution skip into the last decoder step)
         pretrained=True,              #load ImageNet weights into the encoder (resnet34_unet models only)
@@ -87,14 +88,16 @@ if __name__=="__main__":
         crop_size=config["crop_size"],
         img_ids=train_ids,
         filament_crop_prob=config["filament_crop_prob"],
-        augment=config["augment"]
+        augment=config["augment"],
+        preprocess=config.get("preprocess")
     )
     val_data=dataset.Dataset(
         image_dir=IMAGE_DIR,
         annotation_file=ANNOTATION_FILE,
         resize_to=config["resize_to"],
         crop_size=None,         #whole image for validation
-        img_ids=val_ids
+        img_ids=val_ids,
+        preprocess=config.get("preprocess")
     )
 
     optimizer=torch.optim.Adam(model.parameters(),lr=config["lr"])

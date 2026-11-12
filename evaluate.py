@@ -57,6 +57,7 @@ from pycocotools.coco import COCO
 import dataset
 import resnet_unet
 import tiling
+import preprocess
 
 IMAGE_DIR="./MAGFiLO_1.0_Kaggle_2026/train/train_images"
 ANNOTATION_FILE="./MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json"
@@ -66,7 +67,7 @@ SWEEP_MIN_AREAS=[0,100,250,500,1000]
 #filament size groups for recall, by ground-truth area in pixels at 2048x2048 (val set: 230 / 698 / 523 / 142 filaments)
 SIZE_EDGES=[500,1500,5000]
 SIZE_NAMES=["<500 px","500-1500 px","1500-5000 px",">=5000 px"]
-#position on the solar disk, as distance from the disk centre / disk radius (99% of filaments stay within 0.95)
+#position on the solar disk, as distance from the disk centre / radius of the visible limb (preprocess.find_limb)
 ZONE_EDGES=[0.7,0.9,1.0]
 ZONE_NAMES=["centre <0.7R","0.7-0.9R","limb 0.9-1.0R","off-disk >1R"]
 #overlay colours (BGR for OpenCV): reference palette blue / red / yellow, distinguishable with colour blindness
@@ -124,18 +125,6 @@ def gt_label_map(coco, img_id):
         m=coco.annToMask(ann).astype(bool)
         labels[m & (labels==0)]=k   #filaments rarely overlap; a shared pixel stays with the first one
     return labels, len(anns)
-
-
-def fit_disk(img):
-    """Centre (x, y) and radius of the solar disk: least-squares circle through the disk's edge pixels."""
-    b=(img>0.25*np.percentile(img,99)).astype(np.uint8)
-    contours,_=cv2.findContours(b,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_NONE)
-    c=max(contours,key=cv2.contourArea)[:,0,:].astype(np.float64)
-    h,w=img.shape
-    c=c[(c[:,0]>2)&(c[:,0]<w-3)&(c[:,1]>2)&(c[:,1]<h-3)]   #skip points on the image border (clipped disk)
-    x,y=c[:,0],c[:,1]
-    cx,cy,k=np.linalg.lstsq(np.c_[2*x,2*y,np.ones_like(x)],x*x+y*y,rcond=None)[0]
-    return cx,cy,np.sqrt(k+cx*cx+cy*cy)
 
 
 def zone_map(shape, cx, cy, r):
@@ -409,7 +398,8 @@ def main():
         args.overlap=config.get("tile_overlap",128)
     coco=COCO(ANNOTATION_FILE)
     _,val_ids=dataset.split_by_file(coco,val_fraction=args.val_fraction,seed=args.split_seed)
-    val_data=dataset.Dataset(IMAGE_DIR,ANNOTATION_FILE,resize_to=args.resize_to,crop_size=None,img_ids=val_ids)
+    val_data=dataset.Dataset(IMAGE_DIR,ANNOTATION_FILE,resize_to=args.resize_to,crop_size=None,img_ids=val_ids,
+                             preprocess=config.get("preprocess"))   #same preprocessing as in training
 
     #group annotator copies by image file: predict once per file, score against every copy
     by_file=defaultdict(list)
@@ -448,7 +438,7 @@ def main():
                 cv2.imwrite(os.path.join(args.save_probs,f"{os.path.splitext(fname)[0]}.png"),
                             np.round(prob*255).astype(np.uint8))
         #position on the disk, from the raw image
-        zone=zone_map((h,w),*fit_disk(cv2.imread(os.path.join(IMAGE_DIR,fname),cv2.IMREAD_GRAYSCALE)))
+        zone=zone_map((h,w),*preprocess.find_limb(cv2.imread(os.path.join(IMAGE_DIR,fname),cv2.IMREAD_GRAYSCALE)))
         gt_zones=[label_stats(gt,n_gt,zone,np.zeros((h,w)))[0] for gt,n_gt in gts]
         for t in thresholds:
             raw,raw_areas=components(prob>t)

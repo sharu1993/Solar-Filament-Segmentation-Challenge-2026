@@ -7,6 +7,8 @@ from pycocotools.coco import COCO
 from pycocotools import mask as maskUtils
 from torchvision import transforms
 import torchvision.transforms.functional as TF
+import cv2
+import preprocess
 
 import pdb
 
@@ -29,6 +31,13 @@ def augment_geometric(image, mask):
     k=random.randrange(4)
     return image.rot90(k,dims=(-2,-1)), mask.rot90(k,dims=(-2,-1))
 
+def augment_standardised(image, shift=0.2, contrast=0.2):
+    """Brightness/contrast jitter for a preprocessed (standardised) image: random contrast scaling and
+    shift, clipped to the preprocessing range (the mask is unchanged)."""
+    c=1+random.uniform(-contrast,contrast)
+    b=random.uniform(-shift,shift)
+    return (image*c+b).clamp(-preprocess.CLIP,preprocess.CLIP)
+
 def augment_photometric(image, brightness=0.1, contrast=0.2):
     """Random brightness shift and contrast scaling of a 0..1 image (the mask is unchanged)."""
     c=1+random.uniform(-contrast,contrast)
@@ -37,7 +46,8 @@ def augment_photometric(image, brightness=0.1, contrast=0.2):
     return ((image-mean)*c+mean+b).clamp(0,1)
 
 class Dataset(Dataset):
-    def __init__(self, image_dir, annotation_file, resize_to=1024, crop_size=512, img_ids=None, filament_crop_prob=0.8, augment=False):
+    def __init__(self, image_dir, annotation_file, resize_to=1024, crop_size=512, img_ids=None, filament_crop_prob=0.8, augment=False,
+                 preprocess=None):
         """
         resize_to: side length the full 2048x2048 image AND mask are shrunk to (2048 -> 1024 = 2x;
                    2048 = keep the original resolution).
@@ -46,6 +56,9 @@ class Dataset(Dataset):
         filament_crop_prob: chance that a crop is placed on a filament; otherwise it is placed anywhere.
         augment: random flips / 90-degree rotations (image and mask together) and brightness/contrast
                  jitter (image only). Use for training only.
+        preprocess: None = raw image with the ImageNet normalisation (earlier runs);
+                    "local" = limb darkening and local background divided out, standardised per image
+                    (preprocess.local_normalise).
         """
         self.image_dir=image_dir
         self.coco=COCO(annotation_file)
@@ -53,6 +66,9 @@ class Dataset(Dataset):
         self.crop_size=crop_size
         self.filament_crop_prob=filament_crop_prob
         self.augment=augment
+        if preprocess not in (None,"local"):
+            raise ValueError(f"Unknown preprocess '{preprocess}'")
+        self.preprocess=preprocess
         self.img_ids=list(img_ids) if img_ids is not None else self.coco.getImgIds()
 
 
@@ -69,12 +85,21 @@ class Dataset(Dataset):
         mask=self.create_mask(img_id)
         mask=Image.fromarray(mask*255)
 
+        # 0) optional preprocessing at full resolution (before any resize): float image, ~0 on the quiet disk
+        if self.preprocess=="local":
+            image=preprocess.local_normalise(np.array(image))
+
         # 1) shrink image and mask by the same factor
         #    BOX = area averaging (best for downscaling); mask is averaged then thresholded back to 0/1
         size=(self.resize_to, self.resize_to)
-        if image.size!=size:   #at the original resolution there is nothing to resize
-            image=image.resize(size, resample=Image.BOX)
+        if mask.size!=size:   #at the original resolution there is nothing to resize
+            if self.preprocess:
+                image=cv2.resize(image,size,interpolation=cv2.INTER_AREA)
+            else:
+                image=image.resize(size, resample=Image.BOX)
             mask=mask.resize(size, resample=Image.BOX)
+        if self.preprocess:
+            image=torch.from_numpy(image).unsqueeze(0)          # [1, H, W], already standardised
 
         # 2) take the SAME window from image and mask (usually placed on a filament, see choose_crop)
         if self.crop_size is not None:
@@ -82,13 +107,15 @@ class Dataset(Dataset):
             image=TF.crop(image, top, left, self.crop_size, self.crop_size)
             mask=TF.crop(mask, top, left, self.crop_size, self.crop_size)
 
-        image = TF.to_tensor(image)                                            # [1, crop, crop], values 0..1
+        if not self.preprocess:
+            image = TF.to_tensor(image)                                        # [1, crop, crop], values 0..1
         mask = torch.from_numpy((np.array(mask) > 127).astype(np.float32))    # back to 0/1
         mask = mask.unsqueeze(0)                                               # Shape: [1, crop, crop]
         if self.augment:
             image, mask = augment_geometric(image, mask)
-            image = augment_photometric(image)
-        image = TF.normalize(image, mean=[0.485], std=[0.229])                 # same normalisation as before
+            image = augment_standardised(image) if self.preprocess else augment_photometric(image)
+        if not self.preprocess:
+            image = TF.normalize(image, mean=[0.485], std=[0.229])             # same normalisation as before
         return image,mask
 
     def choose_crop(self,img_id):
