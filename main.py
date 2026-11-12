@@ -33,8 +33,10 @@ def git_commit():
 if __name__=="__main__":
     #all settings in one place: used below AND logged to MLflow, so each run records how it was made
     config=dict(
-        resize_to=1024,
+        resize_to=2048,               #original resolution (was 1024): keeps thin and small filaments
         crop_size=512,                #512x512 crops for training
+        tile_size=512,                #validation/evaluation in overlapping 512x512 tiles, blended into one map
+        tile_overlap=128,             #pixels shared by neighbouring tiles
         filament_crop_prob=0.8,       #80% of crops placed on a filament, 20% anywhere
         val_fraction=0.2,
         split_seed=42,
@@ -115,6 +117,8 @@ if __name__=="__main__":
         num_workers=config["num_workers"],
         checkpoint_path=checkpoint_path,
         run_config=config,
+        val_tile_size=config.get("tile_size"),
+        tile_overlap=config.get("tile_overlap",128),
         train_data=train_data,
         val_data=val_data)
 

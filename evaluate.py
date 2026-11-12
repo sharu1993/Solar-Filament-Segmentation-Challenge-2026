@@ -42,6 +42,7 @@ from pycocotools.coco import COCO
 
 import dataset
 import resnet_unet
+import tiling
 
 IMAGE_DIR="./MAGFiLO_1.0_Kaggle_2026/train/train_images"
 ANNOTATION_FILE="./MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json"
@@ -66,22 +67,24 @@ def load_model(checkpoint, device):
     config=state.get("config") or {}
     model=resnet_unet.build_model(config.get("model","unet"),pretrained=False)   #weights come from the checkpoint
     model.load_state_dict(state["model_state_dict"] if "model_state_dict" in state else state)
-    return model.to(device).eval()
+    return model.to(device).eval(), config
 
 
-def predict(model, image, device, tta=False):
-    """Probability map for one image (1, H, W). With tta, the model sees the image in all 8 orientations
-    (4 rotations x mirrored or not, the same set used for training augmentation); each prediction is turned
-    back to the original orientation and the 8 are averaged."""
+def predict(model, image, device, tta=False, tile=None, overlap=128):
+    """Probability map for one image (1, H, W), in overlapping tiles if tile is set (see tiling.py).
+    With tta, the model sees the image in all 8 orientations (4 rotations x mirrored or not, the same set
+    used for training augmentation); each prediction is turned back to the original orientation and the
+    8 are averaged."""
     x=image.unsqueeze(0).to(device)
+    run=lambda z: tiling.predict_tiled(model,z,tile,overlap)
     with torch.no_grad():
         if not tta:
-            return model(x)[0,0].float().cpu().numpy()
+            return run(x)[0,0].float().cpu().numpy()
         total=torch.zeros_like(x[:, :1])
         for mirror in (False,True):
             xm=x.flip(-1) if mirror else x
             for k in range(4):
-                p=model(torch.rot90(xm,k,dims=(-2,-1)))
+                p=run(torch.rot90(xm,k,dims=(-2,-1)))
                 p=torch.rot90(p,-k,dims=(-2,-1))   #undo the rotation...
                 total+=p.flip(-1) if mirror else p #...then the mirroring
         return (total/8)[0,0].float().cpu().numpy()
@@ -200,7 +203,9 @@ def main():
     ap.add_argument("--close",type=int,default=0,help="group pieces within ~this many pixels (at 2048x2048); 0 = off")
     ap.add_argument("--min-area",type=int,default=0,help="minimum filament size in pixels at 2048x2048")
     ap.add_argument("--sweep",action="store_true",help="try a grid of thresholds, grouping distances and min areas")
-    ap.add_argument("--resize-to",type=int,default=1024,help="must match training")
+    ap.add_argument("--resize-to",type=int,default=None,help="default: from the checkpoint's config (1024 for older checkpoints)")
+    ap.add_argument("--tile",type=int,default=None,help="predict in overlapping tiles of this size; default: from the checkpoint's config (none = whole image)")
+    ap.add_argument("--overlap",type=int,default=None,help="pixels shared by neighbouring tiles; default: from the checkpoint's config, else 128")
     ap.add_argument("--val-fraction",type=float,default=0.2,help="must match training")
     ap.add_argument("--split-seed",type=int,default=42,help="must match training")
     ap.add_argument("--limit",type=int,default=None,help="only the first N validation image files")
@@ -208,6 +213,16 @@ def main():
     args=ap.parse_args()
 
     device=torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+    if args.checkpoint is None:
+        args.checkpoint=default_checkpoint()
+    model,config=load_model(args.checkpoint,device)
+    #resolution and tiling as in training, unless given on the command line
+    if args.resize_to is None:
+        args.resize_to=config.get("resize_to",1024)
+    if args.tile is None:
+        args.tile=config.get("tile_size")
+    if args.overlap is None:
+        args.overlap=config.get("tile_overlap",128)
     coco=COCO(ANNOTATION_FILE)
     _,val_ids=dataset.split_by_file(coco,val_fraction=args.val_fraction,seed=args.split_seed)
     val_data=dataset.Dataset(IMAGE_DIR,ANNOTATION_FILE,resize_to=args.resize_to,crop_size=None,img_ids=val_ids)
@@ -223,17 +238,15 @@ def main():
     min_areas=SWEEP_MIN_AREAS if args.sweep else [args.min_area]
     results=defaultdict(list)   #(threshold, close, min_area) -> one result per validation entry
 
-    if args.checkpoint is None:
-        args.checkpoint=default_checkpoint()
-    model=load_model(args.checkpoint,device)
     print(f"Evaluating {args.checkpoint} on {len(files)} validation images "
           f"({sum(len(by_file[f]) for f in files)} annotator copies) on {device}, "
+          f"resolution {args.resize_to}, tiles {f'{args.tile} (overlap {args.overlap})' if args.tile else 'off'}, "
           f"TTA {'on (8 orientations)' if args.tta else 'off'}")
     start=time.perf_counter()
     for n,fname in enumerate(files,start=1):
         idxs=by_file[fname]
         image,_=val_data[idxs[0]]
-        prob=predict(model,image,device,args.tta)
+        prob=predict(model,image,device,args.tta,args.tile,args.overlap)
         gts=[gt_label_map(coco,val_data.img_ids[i]) for i in idxs]
         h,w=gts[0][0].shape
         prob=cv2.resize(prob,(w,h),interpolation=cv2.INTER_LINEAR)   #back to full resolution

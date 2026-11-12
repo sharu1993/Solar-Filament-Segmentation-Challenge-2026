@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torchvision
 import dataset
+import tiling
 import mlflow
 
 def fmt_time(seconds):
@@ -28,7 +29,9 @@ class TrainBox:
             num_workers = 0,
             checkpoint_path = "best_model.pt",
             mlflow_log:bool=True,
-            run_config:dict=None
+            run_config:dict=None,
+            val_tile_size=None,
+            tile_overlap=128
     ):
         self._model=model
         self._best_model=model
@@ -46,6 +49,8 @@ class TrainBox:
         self._resume_state=None     #best IoU/loss and early-stopping counter restored by load_state()
         self.early_stopping_patience=early_stopping_patience  #stop after this many epochs without a better val IoU (None = never)
         self.num_workers=num_workers  #background processes preparing batches while the GPU trains (0 = main process only)
+        self.val_tile_size=val_tile_size  #validate in overlapping tiles of this size (None = whole image at once)
+        self.tile_overlap=tile_overlap    #pixels shared by neighbouring validation tiles
         
         self.train_data=train_data
         self.val_data=val_data
@@ -72,7 +77,7 @@ class TrainBox:
         #persistent_workers keeps the worker processes alive between epochs instead of restarting them
         workers=dict(num_workers=self.num_workers, persistent_workers=self.num_workers>0)
         self._trainloader=torch.utils.data.DataLoader(self.train_data,batch_size=4,shuffle=True,**workers)
-        #validation uses whole 1024x1024 images, one at a time, same pixels every epoch
+        #validation uses whole images (in overlapping tiles if val_tile_size is set), one at a time, same pixels every epoch
         self._validloader=torch.utils.data.DataLoader(self.val_data,batch_size=1,shuffle=False,**workers)
 
     def _log_metric(self,key,value,step=None):
@@ -188,7 +193,7 @@ class TrainBox:
             with torch.no_grad():
                 for images,masks in self._validloader:
                     images,masks=images.to(self._device),masks.to(self._device)
-                    outputs=self._model(images)
+                    outputs=tiling.predict_tiled(self._model,images,self.val_tile_size,self.tile_overlap)
                     loss=self._criterion(outputs,masks)
                     val_loss+=loss.item()
                     #pixel IoU over the whole validation set (prediction = probability > 0.5)

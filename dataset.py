@@ -39,7 +39,8 @@ def augment_photometric(image, brightness=0.1, contrast=0.2):
 class Dataset(Dataset):
     def __init__(self, image_dir, annotation_file, resize_to=1024, crop_size=512, img_ids=None, filament_crop_prob=0.8, augment=False):
         """
-        resize_to: side length the full 2048x2048 image AND mask are shrunk to (2048 -> 1024 = 2x).
+        resize_to: side length the full 2048x2048 image AND mask are shrunk to (2048 -> 1024 = 2x;
+                   2048 = keep the original resolution).
         crop_size: side of the random crop taken (same window) from image and mask. None = no crop.
         img_ids: which image ids to use (e.g. from split_by_file). None = all.
         filament_crop_prob: chance that a crop is placed on a filament; otherwise it is placed anywhere.
@@ -71,8 +72,9 @@ class Dataset(Dataset):
         # 1) shrink image and mask by the same factor
         #    BOX = area averaging (best for downscaling); mask is averaged then thresholded back to 0/1
         size=(self.resize_to, self.resize_to)
-        image=image.resize(size, resample=Image.BOX)
-        mask=mask.resize(size, resample=Image.BOX)
+        if image.size!=size:   #at the original resolution there is nothing to resize
+            image=image.resize(size, resample=Image.BOX)
+            mask=mask.resize(size, resample=Image.BOX)
 
         # 2) take the SAME window from image and mask (usually placed on a filament, see choose_crop)
         if self.crop_size is not None:
