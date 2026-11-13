@@ -55,6 +55,9 @@ if __name__=="__main__":
         model="resnet34_unet_fullres",   #"unet" (from scratch), "resnet34_unet" (ImageNet-pretrained encoder),
                                          #"resnet34_unet_fullres" (+ full-resolution skip into the last decoder step)
         pretrained=True,              #load ImageNet weights into the encoder (resnet34_unet models only)
+        loss_cldice=0.5,              #weight of 1 - clDice (centre-line Dice) added to BCE + Dice (0 = off)
+        loss_lovasz=0.5,              #weight of the Lovasz hinge (smooth 1 - IoU) added to BCE + Dice (0 = off)
+        cldice_iters=15,              #soft-skeleton iterations ~ half-width of the widest filaments (90% are <= 15 px)
     )
 
     #--resume checkpoints/<run>_last.pt (or an older best checkpoint <run>.pt): continue that run
@@ -124,7 +127,11 @@ if __name__=="__main__":
         model=model,
         optimizer=optimizer,
         scheduler=scheduler,
-        criterion=losses.BCEDiceLoss(),   #BCE + Dice: Dice is not swamped by the ~99.7% background pixels
+        #BCE + Dice (Dice is not swamped by the ~99.7% background pixels) + optional clDice and Lovasz hinge;
+        #configs saved before these options existed get 0 for both, i.e. plain BCE + Dice
+        criterion=losses.SegmentationLoss(cldice_weight=config.get("loss_cldice",0.0),
+                                          lovasz_weight=config.get("loss_lovasz",0.0),
+                                          cldice_iters=config.get("cldice_iters",15)),
         epochs=config["epochs"],
         early_stopping_patience=config["early_stopping_patience"],
         num_workers=config["num_workers"],
