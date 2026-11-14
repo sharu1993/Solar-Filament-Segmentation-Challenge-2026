@@ -138,10 +138,14 @@ class Dataset(Dataset):
         anns=self.coco.loadAnns(self.coco.getAnnIds(imgIds=[img_id]))
         if anns and random.random()<self.filament_crop_prob:
             # pick one filament uniformly (small filaments are chosen as often as big ones),
-            # then one point on its spine, which always lies on the filament
+            # then one random pixel inside its segmentation mask. Only the segmentations are used: the
+            # competition does not allow other ground-truth metadata (spines, boxes, labels) in training.
             ann=random.choice(anns)
-            spine=np.array(ann['spine'],dtype=np.float64).reshape(-1,2)
-            x,y=spine[random.randrange(len(spine))]
+            ys,xs=np.nonzero(self.coco.annToMask(ann))
+            if len(xs)==0:      #degenerate polygon: fall back to a window anywhere
+                return random.randrange(size-c+1), random.randrange(size-c+1)
+            k=random.randrange(len(xs))
+            x,y=float(xs[k]),float(ys[k])
             info=self.coco.imgs[img_id]
             x=x*size/int(info['width'])
             y=y*size/int(info['height'])
