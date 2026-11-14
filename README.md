@@ -41,7 +41,7 @@ PQ = sum of IoU over matches / (TP + 0.5 FP + 0.5 FN) = SQ (mean IoU of matches)
 | Optimiser | Adam, LR 1e-3, 2-epoch warm-up then cosine decay to 1e-6, 80 epochs, batch 4 | `main.py` |
 | Training run | ~5.7 min/epoch on an M1 (MPS), ~7.6 h total; best validation IoU 0.532 at epoch 79 | `train_class.py` |
 | Inference | 512x512 tiles with 128 px overlap, linearly blended into one 2048x2048 probability map | `tiling.py` |
-| Post-processing | Threshold 0.5 -> connected components -> pieces within 61 px grouped into one filament -> drop filaments < 250 px or with mean probability < 0.72 | `evaluate.py`, `deliverables/predict.py` |
+| Post-processing | Threshold 0.5 -> connected components -> pieces joined when their ends face each other (gap <= 100 px, directions within 45 degrees, mean probability along the gap >= 0.3) -> drop filaments < 250 px or with mean probability < 0.72 | `grouping.py`, `evaluate.py`, `deliverables/predict.py` |
 
 Experiments are tracked with MLflow (parameters, git commit, per-epoch metrics and timing). Training
 saves a resume checkpoint every epoch (`python main.py --resume checkpoints/<run>_last.pt`).
@@ -58,7 +58,8 @@ Validation set, best post-processing setting per model (threshold / grouping / m
 | + 2048 resolution, cosine LR schedule | 0.399 | 0.670 | 0.595 | 1035 / 851 / 558 |
 | + confidence filter (mean probability >= 0.92) | 0.413 | 0.672 | 0.614 | 977 / 615 / 616 |
 | + full-resolution skip, limb normalisation (confidence >= 0.92) | 0.405 | 0.674 | 0.602 | 981 / 686 / 612 |
-| + clDice and Lovasz hinge in the loss (confidence >= 0.72) | **0.426** | 0.674 | 0.631 | 922 / 406 / 671 |
+| + clDice and Lovasz hinge in the loss (confidence >= 0.72) | 0.426 | 0.674 | 0.631 | 922 / 406 / 671 |
+| + direction-aware grouping instead of the 61 px closing | **0.433** | 0.676 | 0.640 | 951 / 428 / 642 |
 
 Recall by filament size (area at 2048x2048):
 
@@ -66,7 +67,7 @@ Recall by filament size (area at 2048x2048):
 |---|---|---|---|---|
 | ResNet-34, 1024 px | 0.443 | 0.629 | 0.698 | 0.634 |
 | ResNet-34, 2048 px | **0.543** | 0.655 | 0.698 | 0.620 |
-| Best model (+ full-res skip, limb normalisation, clDice + Lovasz) | 0.365 | 0.572 | 0.671 | 0.620 |
+| Best model (+ full-res skip, limb normalisation, clDice + Lovasz, direction-aware grouping) | 0.400 | 0.603 | 0.673 | 0.606 |
 
 The pretrained encoder mainly fixed fragmentation: the number of filaments split into several predictions
 fell from 125 to 79 at the same setting. Training at full resolution recovered small filaments (+0.10 recall)
@@ -81,6 +82,13 @@ clDice and the Lovasz hinge to the loss (the only change between the last two ro
 gain: false positives fell from 686 to 406 for 59 fewer matches. The new loss also makes the model less
 over-confident (median probability inside correct predictions 0.82 instead of 0.96), so the confidence
 cut-off moved from 0.92 to 0.72; correct and false predictions are now further apart in confidence.
+
+Most remaining false positives (64%) are near misses: the right filament, but IoU <= 0.5. More than half
+of them cover only part of a long filament, often because it was predicted as several pieces. The closing
+used to group pieces joins anything within 61 px, so pieces with larger gaps stayed apart while unrelated
+blobs got attached. `grouping.py` joins two pieces only when an end of each points at the other and the
+model's probability along the gap is at least 0.3: +29 matches for +22 false positives (PQ 0.426 -> 0.433),
+with no retraining.
 
 ![Example predictions](deliverables/figures/examples.png)
 
@@ -154,6 +162,7 @@ from the rare filament whose mean probability sits right at the confidence cut-o
 | `dataset.py` | Masks from COCO polygons, filament-aware crops, augmentation, file-grouped split |
 | `unet.py`, `resnet_unet.py` | U-Net from scratch; U-Net with pretrained ResNet-34 encoder |
 | `tiling.py` | Overlapping, blended tile prediction |
+| `grouping.py` | Direction-aware grouping of predicted pieces into filaments |
 | `losses.py` | BCE + Dice loss, clDice and Lovasz hinge terms |
 | `preprocess.py` | Solar disk fit, limb-darkening and local background normalisation |
 | `evaluate.py` | Local PQ evaluation, post-processing sweep, error breakdown, saved/ensembled probability maps |

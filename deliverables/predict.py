@@ -5,14 +5,15 @@ Pipeline per image (same as evaluate.py, so validation scores carry over):
   grayscale image -> preprocessing as in training (none, or limb darkening + local background divided out,
   see preprocess.py; read from the checkpoint config) -> resize to the training resolution (2048 = none)
   -> model in overlapping, blended tiles (tiling.py) -> probability map at 2048x2048
-  -> threshold -> connected components, pieces within --close px grouped into one filament
+  -> threshold -> connected components -> pieces grouped into one filament (--close link: only pieces whose
+     ends face each other across a gap the model partly saw, see grouping.py; or a number: pieces within ~N px)
   -> drop filaments smaller than --min-area px or with mean probability below --min-conf
   -> one row per filament: filament_id = <image name>_<n>, segmentation_rle = pycocotools RLE counts
 
 Defaults are the best validation setting of the current best model, 4c8aa13 (ResNet-34 U-Net with
 full-resolution skip, limb normalisation, BCE + Dice + clDice + Lovasz loss; see README.md):
-threshold 0.5, grouping 61 px, min area 250 px, min confidence 0.72.
-Older models were tuned with other settings (2026-11-11_22-03_f25df8d: --threshold 0.4 --min-conf 0.92).
+threshold 0.5, direction-aware grouping (link), min area 250 px, min confidence 0.72.
+Older models were tuned with other settings (2026-11-11_22-03_f25df8d: --threshold 0.4 --close 61 --min-conf 0.92).
 
 Usage (from the project folder):
     python deliverables/predict.py --checkpoint checkpoints/2026-11-13_06-47_4c8aa13.pt
@@ -43,11 +44,11 @@ from pycocotools import mask as mask_utils
 
 import preprocess
 import tiling
-from evaluate import components, drop_small, load_model, default_checkpoint
+from evaluate import group, close_setting, drop_small, load_model, default_checkpoint
 
 TEST_IMAGES=os.path.join(ROOT,"MAGFiLO_1.0_Kaggle_2026","test","test_images")
 #best validation setting of the current best model (also used by make_figures.py)
-THRESHOLD,CLOSE,MIN_AREA,MIN_CONF=0.5,61,250,0.72
+THRESHOLD,CLOSE,MIN_AREA,MIN_CONF=0.5,"link",250,0.72
 
 
 def load_image(path, resize_to, preprocessing=None):
@@ -73,7 +74,7 @@ def load_image(path, resize_to, preprocessing=None):
 
 def filaments(prob, threshold, close, min_area, min_conf):
     """Probability map -> list of boolean masks, one per predicted filament."""
-    labels,areas=components(prob>threshold,close)
+    labels,areas=group(prob,threshold,close)
     pred,n,_=drop_small(labels,areas,min_area)
     if n==0:
         return []
@@ -92,7 +93,8 @@ def main():
     ap.add_argument("--images",default=TEST_IMAGES,help="folder of .jpeg images (default: the competition test set)")
     ap.add_argument("--out",default="submission.csv")
     ap.add_argument("--threshold",type=float,default=THRESHOLD)
-    ap.add_argument("--close",type=int,default=CLOSE,help="group pieces within ~this many pixels into one filament (0 = off)")
+    ap.add_argument("--close",type=close_setting,default=CLOSE,
+                    help="'link' = join pieces whose ends face each other (grouping.py); a number = group pieces within ~this many pixels (0 = off)")
     ap.add_argument("--min-area",type=int,default=MIN_AREA,help="minimum filament size in pixels at 2048x2048")
     ap.add_argument("--min-conf",type=float,default=MIN_CONF,help="minimum mean probability inside a filament (0 = off)")
     ap.add_argument("--limit",type=int,default=None,help="only the first N images (quick check)")
@@ -109,7 +111,7 @@ def main():
         sys.exit(f"No .jpeg images found in {args.images}")
     print(f"Predicting {len(paths)} images with {checkpoint} on {device} "
           f"(resolution {resize_to}, preprocessing {preprocessing or 'none'}, tiles {tile or 'off'}, overlap {overlap}; threshold {args.threshold}, "
-          f"grouping {args.close} px, min area {args.min_area} px, min confidence {args.min_conf})")
+          f"grouping {args.close}{'' if args.close=='link' else ' px'}, min area {args.min_area} px, min confidence {args.min_conf})")
 
     rows=0
     start=time.perf_counter()

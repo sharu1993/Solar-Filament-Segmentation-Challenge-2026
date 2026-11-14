@@ -109,8 +109,9 @@ fig.tight_layout(); fig.savefig(f"{OUT}/annotators_vs_model.png",dpi=100); plt.c
 # ---- figure 3: validation PQ by step, with the annotator-agreement reference
 steps=[("U-Net, 5 epochs",0.277),("+ augmentation, longer training",0.346),("+ ImageNet ResNet-34 encoder",0.395),
        ("+ 2048 resolution, cosine LR",0.399),("+ confidence filter (>= 0.92)",0.413),
-       ("+ full-res skip, limb normalisation",0.405),("+ clDice + Lovasz loss (conf >= 0.72)",0.426)]
-fig,ax=plt.subplots(figsize=(8,4.6))
+       ("+ full-res skip, limb normalisation",0.405),("+ clDice + Lovasz loss (conf >= 0.72)",0.426),
+       ("+ direction-aware grouping",0.433)]
+fig,ax=plt.subplots(figsize=(8,5.0))
 yy=np.arange(len(steps))[::-1]
 ax.barh(yy,[v for _,v in steps],height=0.55,color=GT)
 for yv,(_,v) in zip(yy,steps): ax.text(v+0.004,yv,f"{v:.3f}",va="center",color=INK,fontsize=9)
