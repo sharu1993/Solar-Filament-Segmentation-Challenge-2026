@@ -3,7 +3,7 @@
 Segmenting solar filaments (dark, thread-like plasma structures above the solar surface) in full-disk
 H-alpha images, for the Kaggle [Solar Filament Segmentation Challenge 2026](https://www.kaggle.com/competitions/filament-segmentation-2026/overview).
 A U-Net with an ImageNet-pretrained ResNet-34 encoder, trained at the original 2048x2048 resolution on a
-MacBook Pro (M1), reaches **Panoptic Quality (PQ) 0.41** on a held-out validation set, which is
+MacBook Pro (M1), reaches **Panoptic Quality (PQ) 0.43** on a held-out validation set, which is
 **higher than human annotators reach when scored against each other (0.345)**.
 
 ![Validation PQ by development step](deliverables/figures/pq_progression.png)
@@ -33,21 +33,22 @@ PQ = sum of IoU over matches / (TP + 0.5 FP + 0.5 FN) = SQ (mean IoU of matches)
 
 | Part | Choice | Where |
 |---|---|---|
-| Model | U-Net decoder on an ImageNet-pretrained ResNet-34 encoder (24.5M parameters); the first layer's three colour filters are summed into one grayscale filter | `resnet_unet.py` |
+| Model | U-Net decoder on an ImageNet-pretrained ResNet-34 encoder (24.5M parameters); the first layer's three colour filters are summed into one grayscale filter; a small full-resolution branch (two 3x3 convs on the input) feeds the last decoder step | `resnet_unet.py` |
+| Preprocessing | Limb darkening divided out (radial brightness profile around a fitted solar disk), then each pixel divided by its local background (125 px median), standardised per image and clipped | `preprocess.py` |
 | Input | Original 2048x2048 resolution; random 512x512 training crops, 80% placed on a filament | `dataset.py` |
 | Augmentation | Flips and 90-degree rotations (image + mask), brightness/contrast jitter | `dataset.py` |
-| Loss | BCE + soft Dice (Dice counters the 0.3% foreground) | `losses.py` |
+| Loss | BCE + soft Dice (Dice counters the 0.3% foreground) + 0.5 x clDice (centre-line Dice: thin parts count by length, not area) + 0.5 x Lovasz hinge (smooth stand-in for IoU) | `losses.py` |
 | Optimiser | Adam, LR 1e-3, 2-epoch warm-up then cosine decay to 1e-6, 80 epochs, batch 4 | `main.py` |
-| Training run | ~4.1 min/epoch on an M1 (MPS), 5.5 h total; best validation IoU 0.531 at epoch 78 | `train_class.py` |
+| Training run | ~5.7 min/epoch on an M1 (MPS), ~7.6 h total; best validation IoU 0.532 at epoch 79 | `train_class.py` |
 | Inference | 512x512 tiles with 128 px overlap, linearly blended into one 2048x2048 probability map | `tiling.py` |
-| Post-processing | Threshold 0.4 -> connected components -> pieces within 61 px grouped into one filament -> drop filaments < 250 px or with mean probability < 0.92 | `evaluate.py`, `deliverables/predict.py` |
+| Post-processing | Threshold 0.5 -> connected components -> pieces within 61 px grouped into one filament -> drop filaments < 250 px or with mean probability < 0.72 | `evaluate.py`, `deliverables/predict.py` |
 
 Experiments are tracked with MLflow (parameters, git commit, per-epoch metrics and timing). Training
 saves a resume checkpoint every epoch (`python main.py --resume checkpoints/<run>_last.pt`).
 
 ## Results
 
-Validation set, best post-processing setting per model (threshold / grouping / min area):
+Validation set, best post-processing setting per model (threshold / grouping / min area / min confidence):
 
 | Step | PQ | SQ | RQ | TP / FP / FN |
 |---|---|---|---|---|
@@ -55,7 +56,9 @@ Validation set, best post-processing setting per model (threshold / grouping / m
 | + augmentation, longer training (best epoch 26) | 0.346 | 0.652 | 0.532 | 851 / 758 / 742 |
 | + ImageNet ResNet-34 encoder (1024 px) | 0.395 | 0.661 | 0.598 | 996 / 742 / 597 |
 | + 2048 resolution, cosine LR schedule | 0.399 | 0.670 | 0.595 | 1035 / 851 / 558 |
-| + confidence filter (mean probability >= 0.92) | **0.413** | 0.672 | 0.614 | 977 / 615 / 616 |
+| + confidence filter (mean probability >= 0.92) | 0.413 | 0.672 | 0.614 | 977 / 615 / 616 |
+| + full-resolution skip, limb normalisation (confidence >= 0.92) | 0.405 | 0.674 | 0.602 | 981 / 686 / 612 |
+| + clDice and Lovasz hinge in the loss (confidence >= 0.72) | **0.426** | 0.674 | 0.631 | 922 / 406 / 671 |
 
 Recall by filament size (area at 2048x2048):
 
@@ -63,15 +66,25 @@ Recall by filament size (area at 2048x2048):
 |---|---|---|---|---|
 | ResNet-34, 1024 px | 0.443 | 0.629 | 0.698 | 0.634 |
 | ResNet-34, 2048 px | **0.543** | 0.655 | 0.698 | 0.620 |
+| Best model (+ full-res skip, limb normalisation, clDice + Lovasz) | 0.365 | 0.572 | 0.671 | 0.620 |
 
 The pretrained encoder mainly fixed fragmentation: the number of filaments split into several predictions
 fell from 125 to 79 at the same setting. Training at full resolution recovered small filaments (+0.10 recall)
 and sharpened outlines (SQ 0.661 -> 0.670), but added false positives, so PQ rose only slightly.
+The best model finds fewer filaments at every size below 5000 px: its gain comes from far fewer false
+positives, not from higher recall.
+
+The full-resolution skip and limb normalisation were tested together and scored slightly lower (0.405); limb
+recall rose (0.41 -> 0.44) but fell back to 0.33 with the new loss below; only 27 filaments lie that close
+to the limb, so these differences are 2-3 filaments. Keeping that model and adding
+clDice and the Lovasz hinge to the loss (the only change between the last two rows) gave the largest single
+gain: false positives fell from 686 to 406 for 59 fewer matches. The new loss also makes the model less
+over-confident (median probability inside correct predictions 0.82 instead of 0.96), so the confidence
+cut-off moved from 0.92 to 0.72; correct and false predictions are now further apart in confidence.
 
 ![Example predictions](deliverables/figures/examples.png)
 
-*Validation images at the 25th, 50th and 85th percentile of per-image PQ (not best cases). The top zoom
-shows the most common error: one long filament covered by several separate pieces.*
+*Validation images at the 25th, 50th and 85th percentile of per-image PQ (not best cases), best model.*
 
 ### Comparison with human annotators
 
@@ -81,7 +94,7 @@ the others with the same PQ metric shows how much the labels themselves disagree
 | On the 48 validation images with 2+ annotators | PQ | SQ | RQ |
 |---|---|---|---|
 | Annotator vs annotator (208 ordered pairs) | 0.345 | 0.629 | 0.548 |
-| Model (2048, before the confidence filter) | **0.397** | 0.668 | 0.594 |
+| Model (2048 ResNet-34, before the confidence filter) | **0.397** | 0.668 | 0.594 |
 
 Over all 296 multi-annotator images, annotator-vs-annotator PQ is 0.340. Annotators often disagree on outlines
 (matched filaments overlap with IoU 0.63 on average) and on whether a structure is one filament or two
@@ -90,7 +103,7 @@ something close to their consensus, so it lands nearer to each annotator than an
 
 ![Three annotators and the model on the same region](deliverables/figures/annotators_vs_model.png)
 
-### Error analysis (2048 model, best setting before the confidence filter)
+### Error analysis (2048 ResNet-34 model, BCE + Dice, best setting before the confidence filter)
 
 - **False positives (851):** 50% overlap a real filament but miss the IoU 0.5 cut-off (69% of those cover
   less than two-thirds of the filament, i.e. only part of its length); 47% overlap no annotated filament;
@@ -117,7 +130,7 @@ something close to their consensus, so it lands nearer to each annotator than an
 pip install -r deliverables/requirements.txt
 # data: put the Kaggle files in MAGFiLO_1.0_Kaggle_2026/ (train/ and test/, as downloaded)
 
-python main.py                                   # train (settings in the config dict in main.py; ~5.5 h on an M1)
+python main.py                                   # train (settings in the config dict in main.py; ~7.6 h on an M1)
 python main.py --resume checkpoints/<run>_last.pt
 python evaluate.py --sweep                       # validation PQ for a grid of post-processing settings + error breakdown
 python evaluate.py --save-probs probs/<run>      # save probability maps once...
@@ -130,7 +143,7 @@ python deliverables/make_figures.py              # regenerate the figures in del
 `submission.csv` has one row per predicted filament: `filament_id` (`<image name>_<n>`) and `segmentation_rle`
 (pycocotools RLE counts of the 2048x2048 mask). Check the ID format against the official sample submission
 before submitting. Exported half-precision weights (49 MB instead of 295 MB) give the same filaments, apart
-from the rare filament whose mean probability sits right at the 0.92 cut-off.
+from the rare filament whose mean probability sits right at the confidence cut-off.
 
 ## Project layout
 
@@ -141,7 +154,8 @@ from the rare filament whose mean probability sits right at the 0.92 cut-off.
 | `dataset.py` | Masks from COCO polygons, filament-aware crops, augmentation, file-grouped split |
 | `unet.py`, `resnet_unet.py` | U-Net from scratch; U-Net with pretrained ResNet-34 encoder |
 | `tiling.py` | Overlapping, blended tile prediction |
-| `losses.py` | BCE + Dice loss |
+| `losses.py` | BCE + Dice loss, clDice and Lovasz hinge terms |
+| `preprocess.py` | Solar disk fit, limb-darkening and local background normalisation |
 | `evaluate.py` | Local PQ evaluation, post-processing sweep, error breakdown, saved/ensembled probability maps |
 | `check_masks.py`, `annotations.py` | Visual checks of masks and annotations |
 | `deliverables/` | Inference script, weight export, figure script and figures, requirements |
@@ -150,15 +164,16 @@ from the rare filament whose mean probability sits right at the 0.92 cut-off.
 
 - All post-processing settings (threshold, grouping, minimum area, confidence cut-off) were chosen on the
   same validation set they are reported on, so the final numbers are slightly optimistic. The confidence
-  cut-off is the most sensitive: PQ is 0.41 for cut-offs between 0.91 and 0.94, but falls to 0.33 at 0.96.
+  cut-off is the most sensitive, and it depends on the loss: 0.92 suits BCE + Dice models, 0.72 the
+  clDice + Lovasz model (at 0.90 and above it removes every prediction of that model).
 - One validation split; training is not seeded, so run-to-run variation is not measured.
-- The resolution and learning-rate schedule changed in the same run, so their individual effects are not separated.
+- Some changes were tested together, so their individual effects are not separated: resolution and
+  learning-rate schedule; full-resolution skip and limb normalisation.
 - Test-set labels are not available; no test score is reported.
 
 ## Possible next steps
 
 - Train on soft labels (the fraction of annotators marking each pixel) to learn the consensus directly.
-- Limb-darkening correction and per-image normalisation (false positives are twice as frequent towards the limb).
 - Larger training crops (768 px) at full resolution, to give the model more context about filament continuity.
 - Self-supervised pretraining on unlabelled GONG H-alpha images.
 

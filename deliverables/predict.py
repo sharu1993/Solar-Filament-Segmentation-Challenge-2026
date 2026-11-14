@@ -2,17 +2,20 @@
 Predict solar filaments on full-disk H-alpha images and write a competition submission CSV.
 
 Pipeline per image (same as evaluate.py, so validation scores carry over):
-  grayscale image -> resize to the training resolution (2048 = none) -> normalise
+  grayscale image -> preprocessing as in training (none, or limb darkening + local background divided out,
+  see preprocess.py; read from the checkpoint config) -> resize to the training resolution (2048 = none)
   -> model in overlapping, blended tiles (tiling.py) -> probability map at 2048x2048
   -> threshold -> connected components, pieces within --close px grouped into one filament
   -> drop filaments smaller than --min-area px or with mean probability below --min-conf
   -> one row per filament: filament_id = <image name>_<n>, segmentation_rle = pycocotools RLE counts
 
-Defaults are the best validation setting of the 2048 ResNet-34 U-Net (see README.md):
-threshold 0.4, grouping 61 px, min area 250 px, min confidence 0.92.
+Defaults are the best validation setting of the current best model, 4c8aa13 (ResNet-34 U-Net with
+full-resolution skip, limb normalisation, BCE + Dice + clDice + Lovasz loss; see README.md):
+threshold 0.5, grouping 61 px, min area 250 px, min confidence 0.72.
+Older models were tuned with other settings (2026-11-11_22-03_f25df8d: --threshold 0.4 --min-conf 0.92).
 
 Usage (from the project folder):
-    python deliverables/predict.py --checkpoint checkpoints/2026-11-11_22-03_f25df8d.pt
+    python deliverables/predict.py --checkpoint checkpoints/2026-11-13_06-47_4c8aa13.pt
     python deliverables/predict.py --checkpoint deliverables/weights/resnet34_unet_2048.pt   # exported weights
     python deliverables/predict.py --images path/to/jpegs --out my_submission.csv --limit 5
 """
@@ -38,17 +41,31 @@ import torchvision.transforms.functional as TF
 from PIL import Image
 from pycocotools import mask as mask_utils
 
+import preprocess
 import tiling
 from evaluate import components, drop_small, load_model, default_checkpoint
 
 TEST_IMAGES=os.path.join(ROOT,"MAGFiLO_1.0_Kaggle_2026","test","test_images")
+#best validation setting of the current best model (also used by make_figures.py)
+THRESHOLD,CLOSE,MIN_AREA,MIN_CONF=0.5,61,250,0.72
 
 
-def load_image(path, resize_to):
-    """Image as the model saw it in training: grayscale, resized (BOX) if needed, normalised. Also the full size."""
+def load_image(path, resize_to, preprocessing=None):
+    """Image as the model saw it in training (same steps as dataset.Dataset), plus its full size.
+    preprocessing=None: grayscale, resized (BOX) if needed, ImageNet-normalised.
+    preprocessing="local": limb darkening and local background divided out at full size (preprocess.py),
+    resized (area) if needed; already standardised, so no further normalisation."""
     image=Image.open(path).convert("L")
     full_size=image.size
-    if resize_to and image.size!=(resize_to,resize_to):
+    resize=resize_to and image.size!=(resize_to,resize_to)
+    if preprocessing=="local":
+        img=preprocess.local_normalise(np.array(image))
+        if resize:
+            img=cv2.resize(img,(resize_to,resize_to),interpolation=cv2.INTER_AREA)
+        return torch.from_numpy(img).unsqueeze(0), full_size
+    if preprocessing:
+        raise ValueError(f"Unknown preprocessing '{preprocessing}' in the checkpoint config")
+    if resize:
         image=image.resize((resize_to,resize_to),resample=Image.BOX)
     x=TF.normalize(TF.to_tensor(image),mean=[0.485],std=[0.229])
     return x, full_size
@@ -74,10 +91,10 @@ def main():
     ap.add_argument("--checkpoint",default=None,help="training checkpoint or exported weights; default: newest in checkpoints/")
     ap.add_argument("--images",default=TEST_IMAGES,help="folder of .jpeg images (default: the competition test set)")
     ap.add_argument("--out",default="submission.csv")
-    ap.add_argument("--threshold",type=float,default=0.4)
-    ap.add_argument("--close",type=int,default=61,help="group pieces within ~this many pixels into one filament (0 = off)")
-    ap.add_argument("--min-area",type=int,default=250,help="minimum filament size in pixels at 2048x2048")
-    ap.add_argument("--min-conf",type=float,default=0.92,help="minimum mean probability inside a filament (0 = off)")
+    ap.add_argument("--threshold",type=float,default=THRESHOLD)
+    ap.add_argument("--close",type=int,default=CLOSE,help="group pieces within ~this many pixels into one filament (0 = off)")
+    ap.add_argument("--min-area",type=int,default=MIN_AREA,help="minimum filament size in pixels at 2048x2048")
+    ap.add_argument("--min-conf",type=float,default=MIN_CONF,help="minimum mean probability inside a filament (0 = off)")
     ap.add_argument("--limit",type=int,default=None,help="only the first N images (quick check)")
     args=ap.parse_args()
 
@@ -86,11 +103,12 @@ def main():
     model,config=load_model(checkpoint,device)
     resize_to=config.get("resize_to",1024)
     tile,overlap=config.get("tile_size"),config.get("tile_overlap",128)
+    preprocessing=config.get("preprocess")
     paths=sorted(glob.glob(os.path.join(args.images,"*.jpeg")))[:args.limit]
     if not paths:
         sys.exit(f"No .jpeg images found in {args.images}")
     print(f"Predicting {len(paths)} images with {checkpoint} on {device} "
-          f"(resolution {resize_to}, tiles {tile or 'off'}, overlap {overlap}; threshold {args.threshold}, "
+          f"(resolution {resize_to}, preprocessing {preprocessing or 'none'}, tiles {tile or 'off'}, overlap {overlap}; threshold {args.threshold}, "
           f"grouping {args.close} px, min area {args.min_area} px, min confidence {args.min_conf})")
 
     rows=0
@@ -99,7 +117,7 @@ def main():
         writer=csv.writer(f)
         writer.writerow(["filament_id","segmentation_rle"])
         for i,path in enumerate(paths,start=1):
-            x,(w,h)=load_image(path,resize_to)
+            x,(w,h)=load_image(path,resize_to,preprocessing)
             with torch.no_grad():
                 prob=tiling.predict_tiled(model,x.unsqueeze(0).to(device),tile,overlap)[0,0].float().cpu().numpy()
             if prob.shape!=(h,w):

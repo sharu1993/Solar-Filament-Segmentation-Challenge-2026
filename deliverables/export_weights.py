@@ -7,7 +7,7 @@ The export keeps only the model weights, stored in half precision (float16), plu
 under GitHub's 100 MB file limit. Weights are converted back to float32 when loaded.
 
 Usage (from the project folder):
-    python deliverables/export_weights.py checkpoints/2026-11-11_22-03_f25df8d.pt deliverables/weights/resnet34_unet_2048.pt
+    python deliverables/export_weights.py checkpoints/2026-11-13_06-47_4c8aa13.pt deliverables/weights/resnet34_unet_2048.pt
 """
 import os
 import sys
