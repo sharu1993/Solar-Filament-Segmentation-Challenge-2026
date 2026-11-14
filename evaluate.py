@@ -5,7 +5,8 @@ Per validation image:
   model (optionally averaged over the 8 flips/rotations with --tta) -> probability map (resize_to x resize_to) -> upsample to the original 2048x2048
         -> threshold -> connected components (each component = one predicted filament)
         -> optionally group pieces lying within ~close_size pixels into one filament (only the predicted
-           pixels are kept; the gap between them is not filled)
+           pixels are kept; the gap between them is not filled), or with --close link join only pieces
+           whose ends face each other across a gap the model partly saw (grouping.py)
         -> drop filaments smaller than min_area pixels (at 2048 scale)
         -> optionally drop filaments whose mean probability is below --min-conf
 Ground truth: every annotator copy of the image is scored separately (one instance per annotated filament).
@@ -28,6 +29,7 @@ Usage (from the project folder):
     python evaluate.py                                # newest checkpoint in checkpoints/, threshold 0.5, min area 0
     python evaluate.py --checkpoint checkpoints/<run name>.pt
     python evaluate.py --threshold 0.4 --close 31 --min-area 250
+    python evaluate.py --threshold 0.5 --close link --min-area 250 --min-conf 0.72   # direction-aware grouping
     python evaluate.py --sweep                        # grid of thresholds x grouping x min areas, best by PQ
     python evaluate.py --limit 10                     # quick check on the first 10 validation images
     python evaluate.py --sweep --tta                  # test-time augmentation: average of 8 flipped/rotated predictions
@@ -57,16 +59,18 @@ from pycocotools.coco import COCO
 import dataset
 import resnet_unet
 import tiling
+import preprocess
+import grouping
 
 IMAGE_DIR="./MAGFiLO_1.0_Kaggle_2026/train/train_images"
 ANNOTATION_FILE="./MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json"
 SWEEP_THRESHOLDS=[0.2,0.3,0.4,0.5]
-SWEEP_CLOSE=[0,31,61,91,121]            #grouping distance in pixels at 2048x2048 (0 = no grouping)
+SWEEP_CLOSE=[0,31,61,91,121,"link"]     #grouping distance in pixels at 2048x2048 (0 = no grouping); "link" = grouping.py
 SWEEP_MIN_AREAS=[0,100,250,500,1000]
 #filament size groups for recall, by ground-truth area in pixels at 2048x2048 (val set: 230 / 698 / 523 / 142 filaments)
 SIZE_EDGES=[500,1500,5000]
 SIZE_NAMES=["<500 px","500-1500 px","1500-5000 px",">=5000 px"]
-#position on the solar disk, as distance from the disk centre / disk radius (99% of filaments stay within 0.95)
+#position on the solar disk, as distance from the disk centre / radius of the visible limb (preprocess.find_limb)
 ZONE_EDGES=[0.7,0.9,1.0]
 ZONE_NAMES=["centre <0.7R","0.7-0.9R","limb 0.9-1.0R","off-disk >1R"]
 #overlay colours (BGR for OpenCV): reference palette blue / red / yellow, distinguishable with colour blindness
@@ -126,18 +130,6 @@ def gt_label_map(coco, img_id):
     return labels, len(anns)
 
 
-def fit_disk(img):
-    """Centre (x, y) and radius of the solar disk: least-squares circle through the disk's edge pixels."""
-    b=(img>0.25*np.percentile(img,99)).astype(np.uint8)
-    contours,_=cv2.findContours(b,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_NONE)
-    c=max(contours,key=cv2.contourArea)[:,0,:].astype(np.float64)
-    h,w=img.shape
-    c=c[(c[:,0]>2)&(c[:,0]<w-3)&(c[:,1]>2)&(c[:,1]<h-3)]   #skip points on the image border (clipped disk)
-    x,y=c[:,0],c[:,1]
-    cx,cy,k=np.linalg.lstsq(np.c_[2*x,2*y,np.ones_like(x)],x*x+y*y,rcond=None)[0]
-    return cx,cy,np.sqrt(k+cx*cx+cy*cy)
-
-
 def zone_map(shape, cx, cy, r):
     """Per-pixel disk zone index (see ZONE_EDGES)."""
     yy,xx=np.mgrid[0:shape[0],0:shape[1]]
@@ -151,6 +143,18 @@ def label_stats(labels, n, zone, prob):
     area=np.maximum(counts.sum(axis=1),1)
     conf=np.bincount(labels.ravel(),weights=prob.ravel(),minlength=n+1)/area
     return counts.argmax(axis=1), conf
+
+
+def close_setting(value):
+    """--close value: a grouping distance in pixels, or "link" for direction-aware grouping (grouping.py)."""
+    return value if value==grouping.LINK else int(value)
+
+
+def group(prob, threshold, close):
+    """Predicted filaments from a probability map with the given grouping (pixels or "link")."""
+    if close==grouping.LINK:
+        return grouping.link_components(prob,threshold)
+    return components(prob>threshold,close)
 
 
 def components(binary, close_size=0):
@@ -370,7 +374,8 @@ def main():
     ap=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint",default=None,help="default: newest file in checkpoints/, else best_model.pt")
     ap.add_argument("--threshold",type=float,default=0.5)
-    ap.add_argument("--close",type=int,default=0,help="group pieces within ~this many pixels (at 2048x2048); 0 = off")
+    ap.add_argument("--close",type=close_setting,default=0,
+                    help="group pieces within ~this many pixels (at 2048x2048); 0 = off; 'link' = direction-aware (grouping.py)")
     ap.add_argument("--min-area",type=int,default=0,help="minimum filament size in pixels at 2048x2048")
     ap.add_argument("--min-conf",type=float,nargs="+",default=[0.0],
                     help="drop filaments with a lower mean probability (0 = off); several values are all tried, also with --sweep")
@@ -409,7 +414,8 @@ def main():
         args.overlap=config.get("tile_overlap",128)
     coco=COCO(ANNOTATION_FILE)
     _,val_ids=dataset.split_by_file(coco,val_fraction=args.val_fraction,seed=args.split_seed)
-    val_data=dataset.Dataset(IMAGE_DIR,ANNOTATION_FILE,resize_to=args.resize_to,crop_size=None,img_ids=val_ids)
+    val_data=dataset.Dataset(IMAGE_DIR,ANNOTATION_FILE,resize_to=args.resize_to,crop_size=None,img_ids=val_ids,
+                             preprocess=config.get("preprocess"))   #same preprocessing as in training
 
     #group annotator copies by image file: predict once per file, score against every copy
     by_file=defaultdict(list)
@@ -448,13 +454,13 @@ def main():
                 cv2.imwrite(os.path.join(args.save_probs,f"{os.path.splitext(fname)[0]}.png"),
                             np.round(prob*255).astype(np.uint8))
         #position on the disk, from the raw image
-        zone=zone_map((h,w),*fit_disk(cv2.imread(os.path.join(IMAGE_DIR,fname),cv2.IMREAD_GRAYSCALE)))
+        zone=zone_map((h,w),*preprocess.find_limb(cv2.imread(os.path.join(IMAGE_DIR,fname),cv2.IMREAD_GRAYSCALE)))
         gt_zones=[label_stats(gt,n_gt,zone,np.zeros((h,w)))[0] for gt,n_gt in gts]
         for t in thresholds:
             raw,raw_areas=components(prob>t)
             splits=[split_count(gt,n_gt,raw,len(raw_areas)-1) for gt,n_gt in gts]
             for c in closes:
-                labels,areas=(raw,raw_areas) if c==0 else components(prob>t,c)
+                labels,areas=(raw,raw_areas) if c==0 else group(prob,t,c)
                 label_zone,label_conf=label_stats(labels,len(areas)-1,zone,prob)
                 for a in min_areas:
                     pred,n_pred,old=drop_small(labels,areas,a)
@@ -475,11 +481,11 @@ def main():
     print(f"\n{'thresh':>6} {'close':>5} {'min_area':>8} {'min_conf':>8} {'PQ':>6} {'SQ':>6} {'RQ':>6} {'PQ/img':>6} {'Dice':>6} "
           f"{'TP':>5} {'FP':>5} {'FN':>5} {'GT/img':>6} {'pred/img':>8} {'1-to-many':>9} {'many-to-1':>9} {'split(raw)':>10}")
     for t,c,a,m,s in rows:
-        print(f"{t:>6.2f} {c:>5d} {a:>8d} {m:>8.2f} {s['PQ']:>6.3f} {s['SQ']:>6.3f} {s['RQ']:>6.3f} {s['PQ_mean_per_image']:>6.3f} "
+        print(f"{t:>6.2f} {c!s:>5} {a:>8d} {m:>8.2f} {s['PQ']:>6.3f} {s['SQ']:>6.3f} {s['RQ']:>6.3f} {s['PQ_mean_per_image']:>6.3f} "
               f"{s['mean_dice']:>6.3f} {s['TP']:>5d} {s['FP']:>5d} {s['FN']:>5d} {s['gt_per_image']:>6.1f} "
               f"{s['pred_per_image']:>8.1f} {s['one_to_many']:>9d} {s['many_to_one']:>9d} {s['split_raw']:>10d}")
     t,c,a,m,s=rows[0]
-    print(f"\nBest: threshold {t}, grouping {c} px, min area {a}, min confidence {m} -> PQ {s['PQ']:.3f} (SQ {s['SQ']:.3f} x RQ {s['RQ']:.3f}), "
+    print(f"\nBest: threshold {t}, grouping {c if c==grouping.LINK else f'{c} px'}, min area {a}, min confidence {m} -> PQ {s['PQ']:.3f} (SQ {s['SQ']:.3f} x RQ {s['RQ']:.3f}), "
           f"mean Dice {s['mean_dice']:.3f}, over {s['entries']} annotator copies")
     print(f"\nRecall by filament size (best setting; all sizes: {s['recall']:.3f})")
     print(f"{'size':>14} {'filaments':>9} {'found':>6} {'recall':>6}")
@@ -494,7 +500,7 @@ def main():
             stem=os.path.splitext(fname)[0]
             prob=np.mean([cv2.imread(os.path.join(d,f"{stem}.png"),cv2.IMREAD_GRAYSCALE).astype(np.float32)/255
                           for d in folders],axis=0)
-            labels,areas=components(prob>t,c)
+            labels,areas=group(prob,t,c)
             pred,n_pred,_=drop_small(labels,areas,a)
             if m>0:
                 pred,n_pred,_=drop_unconfident(pred,n_pred,mean_conf(pred,n_pred,prob),m)
@@ -504,7 +510,7 @@ def main():
                 gt,n_gt=gt_label_map(coco,val_data.img_ids[i])
                 suffix=f"_a{k}" if len(idxs)>1 else ""
                 save_overlay(os.path.join(args.save_overlays,f"{stem}{suffix}.jpg"),image,gt,n_gt,pred,n_pred,
-                             f"{stem}{suffix}  (threshold {t}, grouping {c} px, min area {a} px, min confidence {m})")
+                             f"{stem}{suffix}  (threshold {t}, grouping {c if c==grouping.LINK else f'{c} px'}, min area {a} px, min confidence {m})")
                 annotator=val_data.img_ids[i].split("-",1)[0]   #annotation batch id, e.g. 050103
                 save_gt_picture(os.path.join(args.save_overlays,f"{stem}{suffix}_gt.jpg"),image,gt,n_gt,
                                 f"{stem}{suffix}  (annotation set {annotator}, copy {k} of {len(idxs)})")

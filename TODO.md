@@ -128,3 +128,11 @@ Findings: matched filaments are outlined reasonably (SQ ~0.63) but only 43% of r
 - [ ] Pilot: continue pretraining the ImageNet ResNet-34 on ~2–5k unlabelled GONG H-alpha images (masked-image modelling), then the same fine-tuning recipe (needs download approval; exclude validation dates and nearby hours)
 - [ ] Compare random vs ImageNet vs ImageNet + GONG pretraining on IoU and PQ
 - [ ] If it helps: scale up (more images, cloud GPU) and/or pseudo-labelling of unlabelled GONG images
+
+## Phase 6 – Chirality classification (later)
+Chirality = handedness of a filament's magnetic field: Right (dextral) / Left (sinistral), read from the angle of the barbs relative to the spine. Not part of the competition metric (PQ scores segmentation only). Train labels: Left 2,535 / Right 2,590 / Unidentifiable 3,074. Annotators agree on Left/Right with Cohen's kappa 0.66 (0.47 for all three classes).
+- [ ] Classify each segmented filament as Left / Right / Unidentifiable (crop around the filament, small classifier; possibly reuse the ResNet-34 encoder)
+- [ ] Baseline to compare with: Chalmers & Ahmadzadeh 2025, arXiv:2509.18214 (first reproducible chirality baseline on MAGFiLO)
+- [ ] Handle annotator disagreement (one copy says Unidentifiable, another Left/Right): per-copy labels vs consensus
+- [ ] Barbs drive the label: check whether 512 px crops / current outlines keep enough barb detail
+- [ ] Sanity check: hemispheric preference (north mostly one chirality, south the other) in the predictions

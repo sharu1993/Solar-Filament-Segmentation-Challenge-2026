@@ -34,8 +34,8 @@ if __name__=="__main__":
     #all settings in one place: used below AND logged to MLflow, so each run records how it was made
     config=dict(
         resize_to=2048,               #original resolution (was 1024): keeps thin and small filaments
-        crop_size=512,                #512x512 crops for training
-        tile_size=512,                #validation/evaluation in overlapping 512x512 tiles, blended into one map
+        crop_size=768,                #768x768 crops for training (was 512): more context for long and split filaments
+        tile_size=768,                #validation/evaluation in overlapping 768x768 tiles (3x3 per image), blended into one map
         tile_overlap=128,             #pixels shared by neighbouring tiles
         filament_crop_prob=0.8,       #80% of crops placed on a filament, 20% anywhere
         val_fraction=0.2,
@@ -51,8 +51,14 @@ if __name__=="__main__":
         epochs=80,                    #overnight run: roughly 4-5 min/epoch at 2048 on the M1 -> ~6 h
         early_stopping_patience=None, #off: with cosine the best epochs usually come late, when the LR is small
         num_workers=4,                #prepare batches in 4 background processes
-        model="resnet34_unet",        #"unet" (from scratch) or "resnet34_unet" (ImageNet-pretrained encoder)
-        pretrained=True,              #load ImageNet weights into the encoder (resnet34_unet only)
+        preprocess="local",           #limb darkening + local background divided out, per-image standardised (None = raw)
+        model="resnet34_unet_fullres",   #"unet" (from scratch), "resnet34_unet" (ImageNet-pretrained encoder),
+                                         #"resnet34_unet_fullres" (+ full-resolution skip into the last decoder step)
+        pretrained=True,              #load ImageNet weights into the encoder (resnet34_unet models only)
+        loss_cldice=0.5,              #weight of 1 - clDice (centre-line Dice) added to BCE + Dice (0 = off)
+        loss_lovasz=0.5,              #weight of the Lovasz hinge (smooth 1 - IoU) added to BCE + Dice (0 = off)
+        cldice_iters=15,              #soft-skeleton iterations ~ half-width of the widest filaments (90% are <= 15 px)
+        soft_labels=True,             #train on the fraction of annotators marking each pixel (False = each copy's 0/1 mask)
     )
 
     #--resume checkpoints/<run>_last.pt (or an older best checkpoint <run>.pt): continue that run
@@ -86,14 +92,17 @@ if __name__=="__main__":
         crop_size=config["crop_size"],
         img_ids=train_ids,
         filament_crop_prob=config["filament_crop_prob"],
-        augment=config["augment"]
+        augment=config["augment"],
+        preprocess=config.get("preprocess"),
+        soft_labels=config.get("soft_labels",False)   #configs saved before this option: hard labels
     )
     val_data=dataset.Dataset(
         image_dir=IMAGE_DIR,
         annotation_file=ANNOTATION_FILE,
         resize_to=config["resize_to"],
         crop_size=None,         #whole image for validation
-        img_ids=val_ids
+        img_ids=val_ids,
+        preprocess=config.get("preprocess")
     )
 
     optimizer=torch.optim.Adam(model.parameters(),lr=config["lr"])
@@ -120,7 +129,11 @@ if __name__=="__main__":
         model=model,
         optimizer=optimizer,
         scheduler=scheduler,
-        criterion=losses.BCEDiceLoss(),   #BCE + Dice: Dice is not swamped by the ~99.7% background pixels
+        #BCE + Dice (Dice is not swamped by the ~99.7% background pixels) + optional clDice and Lovasz hinge;
+        #configs saved before these options existed get 0 for both, i.e. plain BCE + Dice
+        criterion=losses.SegmentationLoss(cldice_weight=config.get("loss_cldice",0.0),
+                                          lovasz_weight=config.get("loss_lovasz",0.0),
+                                          cldice_iters=config.get("cldice_iters",15)),
         epochs=config["epochs"],
         early_stopping_patience=config["early_stopping_patience"],
         num_workers=config["num_workers"],

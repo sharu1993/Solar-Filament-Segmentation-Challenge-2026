@@ -1,11 +1,12 @@
 """
 Regenerate the README figures in deliverables/figures/ from saved validation probability maps.
 
-Needs the maps of the 2048 model, saved once with:
-    python evaluate.py --checkpoint checkpoints/2026-11-11_22-03_f25df8d.pt --save-probs probs/f25df8d
+Needs the maps of the best model (4c8aa13), saved once with:
+    python evaluate.py --checkpoint checkpoints/2026-11-13_06-47_4c8aa13.pt --save-probs probs/4c8aa13
 Then (from the project folder):
     python deliverables/make_figures.py
-Images were picked by per-image PQ (25th / 50th / 85th percentile) so they are representative, not best cases.
+Predictions use the post-processing defaults of predict.py. The example images are picked automatically by
+per-annotator-copy PQ (25th / 50th / 85th percentile), so they are representative, not best cases.
 """
 import os, sys, numpy as np, cv2
 HERE=os.path.dirname(os.path.abspath(__file__))
@@ -20,7 +21,7 @@ from pycocotools.coco import COCO
 from collections import defaultdict
 OUT=os.path.join(HERE,"figures")
 os.makedirs(OUT,exist_ok=True)
-PROBS=os.path.join(ROOT,"probs","f25df8d")
+PROBS=os.path.join(ROOT,"probs","4c8aa13")
 GT, PRED = "#2a78d6", "#eb6834"                 # reference palette, categorical slots 1 and 2
 INK, INK2, SURF = "#0b0b0b", "#52514e", "#fcfcfb"
 plt.rcParams.update({"font.size":10,"text.color":INK,"axes.labelcolor":INK2,"xtick.color":INK2,"ytick.color":INK2,
@@ -31,7 +32,7 @@ for i in va: by_file[coco.imgs[i]['file_name']].append(i)
 
 def pred_masks(f):
     prob=cv2.imread(os.path.join(PROBS,os.path.splitext(f)[0]+".png"),0).astype(np.float32)/255
-    return predict.filaments(prob,0.4,61,250,0.92)
+    return predict.filaments(prob,predict.THRESHOLD,predict.CLOSE,predict.MIN_AREA,predict.MIN_CONF)
 def gt_masks(img_id):
     return [coco.annToMask(a).astype(bool) for a in coco.loadAnns(coco.getAnnIds(imgIds=[img_id]))]
 def draw(ax, masks, color, scale=1.0, off=(0,0), lw=1.0):
@@ -57,14 +58,30 @@ def best_window(masks, size):
     return x,y
 def image(f): return cv2.imread(os.path.join(ROOT,ev.IMAGE_DIR,f),cv2.IMREAD_GRAYSCALE)
 
-# ---- figure 1: three validation images (25th / 50th / 85th percentile of per-image PQ)
-picks=[("20120901114934Ch.jpeg","25th percentile image (image PQ 0.33)"),
-       ("20160411134234Ch.jpeg","Median image (image PQ 0.42)"),
-       ("20120811121434Ch.jpeg","85th percentile image (image PQ 0.54; annotator 1 of 3 shown)")]
+def label_map(masks):
+    lab=np.zeros((2048,2048),np.int32)
+    for k,m in enumerate(masks,start=1): lab[m&(lab==0)]=k
+    return lab
+
+# ---- figure 1: three validation images (25th / 50th / 85th percentile of per-annotator-copy PQ)
+scores=[]   #(PQ, file, copy index) for every annotator copy with at least one filament or prediction
+for f in sorted(by_file):
+    p=pred_masks(f); pl=label_map(p)
+    for c,img_id in enumerate(by_file[f]):
+        g,ng=ev.gt_label_map(coco,img_id)
+        r=ev.match(g,ng,pl,len(p))
+        d=r["tp"]+0.5*r["fp"]+0.5*r["fn"]
+        if d>0: scores.append((r["sum_iou"]/d,f,c))
+scores.sort()
+picks=[]
+for q,name in ((25,"25th percentile"),(50,"Median"),(85,"85th percentile")):
+    v,f,c=scores[min(int(len(scores)*q/100),len(scores)-1)]
+    n=len(by_file[f])
+    picks.append((f,c,f"{name} image (image PQ {v:.2f}{f'; annotator {c+1} of {n} shown' if n>1 else ''})"))
 Z=640
 fig,axes=plt.subplots(3,2,figsize=(10,15.2))
-for row,(f,title) in enumerate(picks):
-    img=image(f); g=gt_masks(by_file[f][0]); p=pred_masks(f)
+for row,(f,c,title) in enumerate(picks):
+    img=image(f); g=gt_masks(by_file[f][c]); p=pred_masks(f)
     small=cv2.resize(img,(1024,1024),interpolation=cv2.INTER_AREA)
     a=axes[row,0]; a.imshow(small,cmap="gray",vmin=0,vmax=255); draw(a,g,GT,0.5,lw=0.9); draw(a,p,PRED,0.5,lw=0.9)
     x,y=best_window(g+p,Z)
@@ -91,8 +108,10 @@ fig.tight_layout(); fig.savefig(f"{OUT}/annotators_vs_model.png",dpi=100); plt.c
 
 # ---- figure 3: validation PQ by step, with the annotator-agreement reference
 steps=[("U-Net, 5 epochs",0.277),("+ augmentation, longer training",0.346),("+ ImageNet ResNet-34 encoder",0.395),
-       ("+ 2048 resolution, cosine LR",0.399),("+ confidence filter (>= 0.92)",0.413)]
-fig,ax=plt.subplots(figsize=(8,3.7))
+       ("+ 2048 resolution, cosine LR",0.399),("+ confidence filter (>= 0.92)",0.413),
+       ("+ full-res skip, limb normalisation",0.405),("+ clDice + Lovasz loss (conf >= 0.72)",0.426),
+       ("+ direction-aware grouping",0.433)]
+fig,ax=plt.subplots(figsize=(8,5.0))
 yy=np.arange(len(steps))[::-1]
 ax.barh(yy,[v for _,v in steps],height=0.55,color=GT)
 for yv,(_,v) in zip(yy,steps): ax.text(v+0.004,yv,f"{v:.3f}",va="center",color=INK,fontsize=9)
