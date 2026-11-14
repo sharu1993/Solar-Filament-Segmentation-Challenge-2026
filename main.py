@@ -34,8 +34,8 @@ if __name__=="__main__":
     #all settings in one place: used below AND logged to MLflow, so each run records how it was made
     config=dict(
         resize_to=2048,               #original resolution (was 1024): keeps thin and small filaments
-        crop_size=512,                #512x512 crops for training
-        tile_size=512,                #validation/evaluation in overlapping 512x512 tiles, blended into one map
+        crop_size=768,                #768x768 crops for training (was 512): more context for long and split filaments
+        tile_size=768,                #validation/evaluation in overlapping 768x768 tiles (3x3 per image), blended into one map
         tile_overlap=128,             #pixels shared by neighbouring tiles
         filament_crop_prob=0.8,       #80% of crops placed on a filament, 20% anywhere
         val_fraction=0.2,
@@ -58,6 +58,7 @@ if __name__=="__main__":
         loss_cldice=0.5,              #weight of 1 - clDice (centre-line Dice) added to BCE + Dice (0 = off)
         loss_lovasz=0.5,              #weight of the Lovasz hinge (smooth 1 - IoU) added to BCE + Dice (0 = off)
         cldice_iters=15,              #soft-skeleton iterations ~ half-width of the widest filaments (90% are <= 15 px)
+        soft_labels=True,             #train on the fraction of annotators marking each pixel (False = each copy's 0/1 mask)
     )
 
     #--resume checkpoints/<run>_last.pt (or an older best checkpoint <run>.pt): continue that run
@@ -92,7 +93,8 @@ if __name__=="__main__":
         img_ids=train_ids,
         filament_crop_prob=config["filament_crop_prob"],
         augment=config["augment"],
-        preprocess=config.get("preprocess")
+        preprocess=config.get("preprocess"),
+        soft_labels=config.get("soft_labels",False)   #configs saved before this option: hard labels
     )
     val_data=dataset.Dataset(
         image_dir=IMAGE_DIR,

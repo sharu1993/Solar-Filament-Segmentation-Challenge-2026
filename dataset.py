@@ -1,4 +1,5 @@
 import random
+from collections import defaultdict
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -47,7 +48,7 @@ def augment_photometric(image, brightness=0.1, contrast=0.2):
 
 class Dataset(Dataset):
     def __init__(self, image_dir, annotation_file, resize_to=1024, crop_size=512, img_ids=None, filament_crop_prob=0.8, augment=False,
-                 preprocess=None):
+                 preprocess=None, soft_labels=False):
         """
         resize_to: side length the full 2048x2048 image AND mask are shrunk to (2048 -> 1024 = 2x;
                    2048 = keep the original resolution).
@@ -59,6 +60,11 @@ class Dataset(Dataset):
         preprocess: None = raw image with the ImageNet normalisation (earlier runs);
                     "local" = limb darkening and local background divided out, standardised per image
                     (preprocess.local_normalise).
+        soft_labels: target = fraction of this image's annotators that marked each pixel (0, 1/3, 1/2, ...),
+                     averaged over all annotator copies of the same image file, instead of this copy's 0/1 mask.
+                     There is still one sample per annotator copy (same samples and crop placement as with
+                     hard labels), so only the target changes. Use for training only: validation scores
+                     each copy's own mask.
         """
         self.image_dir=image_dir
         self.coco=COCO(annotation_file)
@@ -70,6 +76,10 @@ class Dataset(Dataset):
             raise ValueError(f"Unknown preprocess '{preprocess}'")
         self.preprocess=preprocess
         self.img_ids=list(img_ids) if img_ids is not None else self.coco.getImgIds()
+        self.soft_labels=soft_labels
+        self.copies=defaultdict(list)   #image file -> every annotator copy of it (all copies of a file share a split)
+        for i in self.coco.getImgIds():
+            self.copies[self.coco.imgs[i]['file_name']].append(i)
 
 
     def __len__(self):
@@ -82,8 +92,8 @@ class Dataset(Dataset):
         image=Image.open(f'{self.image_dir}/{filename}.jpeg').convert("L") #convert to grayscale
 
         #get binary mask data at the image's full resolution (2048x2048)
-        mask=self.create_mask(img_id)
-        mask=Image.fromarray(mask*255)
+        mask=self.soft_mask(img_id) if self.soft_labels else self.create_mask(img_id)*255
+        mask=Image.fromarray(mask)
 
         # 0) optional preprocessing at full resolution (before any resize): float image, ~0 on the quiet disk
         if self.preprocess=="local":
@@ -109,7 +119,10 @@ class Dataset(Dataset):
 
         if not self.preprocess:
             image = TF.to_tensor(image)                                        # [1, crop, crop], values 0..1
-        mask = torch.from_numpy((np.array(mask) > 127).astype(np.float32))    # back to 0/1
+        if self.soft_labels:
+            mask = torch.from_numpy(np.array(mask).astype(np.float32)/255)     # annotator fraction 0..1
+        else:
+            mask = torch.from_numpy((np.array(mask) > 127).astype(np.float32)) # back to 0/1
         mask = mask.unsqueeze(0)                                               # Shape: [1, crop, crop]
         if self.augment:
             image, mask = augment_geometric(image, mask)
@@ -140,6 +153,12 @@ class Dataset(Dataset):
             return top,left
         # otherwise: a window anywhere, so the model also sees background, the limb and off-disk sky
         return random.randrange(size-c+1), random.randrange(size-c+1)
+
+    def soft_mask(self,img_id):
+        """uint8 mask 0..255 at full size: share of the annotator copies of this image file marking each pixel."""
+        copies=self.copies[self.coco.imgs[img_id]['file_name']]
+        total=sum(self.create_mask(i).astype(np.float32) for i in copies)
+        return np.round(total/len(copies)*255).astype(np.uint8)
 
     def create_mask(self,img_id):
         """Binary mask at the image's true size, with every filament of this annotator copy drawn in."""

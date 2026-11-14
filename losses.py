@@ -78,9 +78,10 @@ def _lovasz_grad(gt_sorted):
 def lovasz_hinge(logits, targets):
     """Lovasz hinge over the whole batch (all pixels together, like the Dice term): a smooth stand-in for
     1 - IoU of the filament mask. Pixels are sorted by how wrong they are, and each error is weighted by how
-    much it lowers the IoU."""
+    much it lowers the IoU. Needs 0/1 labels: soft targets (annotator fractions) are turned into a majority
+    vote, filament where at least half of the annotators marked it."""
     logits=logits.reshape(-1)
-    labels=targets.reshape(-1)
+    labels=(targets.reshape(-1)>=0.5).float()
     errors=1-logits*(2*labels-1)               #hinge margin: > 0 when the pixel is wrong or not confident enough
     errors_sorted,order=torch.sort(errors,descending=True)
     return torch.dot(F.relu(errors_sorted),_lovasz_grad(labels[order]))
