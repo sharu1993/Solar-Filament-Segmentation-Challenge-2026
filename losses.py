@@ -55,13 +55,15 @@ def soft_skeleton(x, iters):
     return skel
 
 
-def cldice_loss(probs, targets, iters, smooth=1.0):
+def cldice_loss(probs, targets, iters, smooth=1.0, skel_t=None):
     """1 - clDice over the whole batch. Topology precision: share of the predicted centre line inside the true
     filaments; topology sensitivity: share of the true centre line covered by the prediction. Long thin parts
-    count by length, not by area, and the score barely depends on how wide each annotator drew the outline."""
+    count by length, not by area, and the score barely depends on how wide each annotator drew the outline.
+    skel_t: the target's soft skeleton, if already computed."""
     skel_p=soft_skeleton(probs,iters)
-    with torch.no_grad():
-        skel_t=soft_skeleton(targets,iters)
+    if skel_t is None:
+        with torch.no_grad():
+            skel_t=soft_skeleton(targets,iters)
     tprec=((skel_p*targets).sum()+smooth)/(skel_p.sum()+smooth)
     tsens=((skel_t*probs).sum()+smooth)/(skel_t.sum()+smooth)
     return 1-2*tprec*tsens/(tprec+tsens)
@@ -89,13 +91,15 @@ def lovasz_hinge(logits, targets):
     return torch.dot(F.relu(errors_sorted),_lovasz_grad(labels[order]))
 
 
-def skeleton_weighted_bce(probs, targets, skel_weight, iters):
+def skeleton_weighted_bce(probs, targets, skel_weight, iters, skel_t=None):
     """BCE with each pixel near a filament's centre line counted 1 + skel_weight times. A gap across a filament
     then costs as much as losing skel_weight times more area, so pieces of one filament are pushed to connect.
     The centre line is the soft skeleton of the target (centre lines computed from the masks), widened by one
-    pixel on each side so it is not missed by a one-pixel offset."""
+    pixel on each side so it is not missed by a one-pixel offset. skel_t: the target's soft skeleton, if already computed."""
     with torch.no_grad():
-        weight=1+skel_weight*_soft_dilate(soft_skeleton(targets,iters))
+        if skel_t is None:
+            skel_t=soft_skeleton(targets,iters)
+        weight=1+skel_weight*_soft_dilate(skel_t)
     return F.binary_cross_entropy(probs,targets,weight=weight)
 
 
@@ -120,7 +124,10 @@ def instance_dice_loss(probs, targets, margin=32, smooth=1.0):
             lab=labels[y0:y1,x0:x1]
             piece=(lab==k)
             with torch.no_grad():
-                near=F.max_pool2d(piece[None,None].float(),2*margin+1,1,margin)[0,0]>0
+                #square dilation by margin, as two 1-D max-pools (same result as one square pool, much cheaper)
+                near=piece[None,None].float()
+                near=F.max_pool2d(near,(2*margin+1,1),1,(margin,0))
+                near=F.max_pool2d(near,(1,2*margin+1),1,(0,margin))[0,0]>0
                 region=(near&((lab==0)|piece)).float()       #neighbourhood minus the other filaments
             p,t=probs[b,0,y0:y1,x0:x1]*region,targets[b,0,y0:y1,x0:x1]*region
             dice=(2*(p*t).sum()+smooth)/(p.sum()+t.sum()+smooth)
@@ -149,16 +156,20 @@ class SegmentationLoss(BCEDiceLoss):
         self.instance_margin=instance_margin
 
     def forward(self, probs, targets):
+        skel_t=None
+        if self.skel_weight and self.cldice_weight:
+            with torch.no_grad():
+                skel_t=soft_skeleton(targets,self.cldice_iters)    #target centre line, shared by both terms
         if self.skel_weight:
             #same as BCEDiceLoss.forward, with the skeleton-weighted BCE in place of the plain one
             intersection=(probs*targets).sum()
             dice=(2*intersection+self.smooth)/(probs.sum()+targets.sum()+self.smooth)
-            loss=(self.bce_weight*skeleton_weighted_bce(probs,targets,self.skel_weight,self.cldice_iters)
+            loss=(self.bce_weight*skeleton_weighted_bce(probs,targets,self.skel_weight,self.cldice_iters,skel_t)
                   +self.dice_weight*(1-dice))
         else:
             loss=super().forward(probs,targets)
         if self.cldice_weight:
-            loss=loss+self.cldice_weight*cldice_loss(probs,targets,self.cldice_iters,self.smooth)
+            loss=loss+self.cldice_weight*cldice_loss(probs,targets,self.cldice_iters,self.smooth,skel_t)
         if self.lovasz_weight:
             p=probs.clamp(1e-6,1-1e-6)
             loss=loss+self.lovasz_weight*lovasz_hinge(torch.log(p)-torch.log1p(-p),targets)
