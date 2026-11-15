@@ -1,0 +1,10 @@
+# Python 3.10. Exact versions of the environment the pipeline notebook (pipeline.ipynb), predict.py,
+# evaluate.py and make_figures.py were run and checked in (Linux, CPU). Training ran on an Apple M1 (MPS).
+# On Linux, pip installs the CUDA build of torch, which uses an NVIDIA GPU when one is available.
+torch==2.14.1
+torchvision==0.29.1
+numpy==2.2.6
+opencv-python-headless==5.0.0.93
+pillow==12.3.0
+pycocotools==2.0.11
+matplotlib==3.10.9
