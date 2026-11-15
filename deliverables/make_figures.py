@@ -1,12 +1,13 @@
 """
 Regenerate the README figures in deliverables/figures/ from saved validation probability maps.
 
-Needs the maps of the best model (4c8aa13), saved once with:
-    python evaluate.py --checkpoint checkpoints/2026-11-13_06-47_4c8aa13.pt --save-probs probs/4c8aa13
+Needs the maps of the best model (5981095), saved once with:
+    python evaluate.py --checkpoint checkpoints/2026-11-14_03-27_5981095.pt --save-probs probs/5981095
 Then (from the project folder):
     python deliverables/make_figures.py
 Predictions use the post-processing defaults of predict.py. The example images are picked automatically by
-per-annotator-copy PQ (25th / 50th / 85th percentile), so they are representative, not best cases.
+per-annotator-copy PQ (25th / 50th / 85th percentile) among copies with at least MIN_FILAMENTS annotated
+filaments (about the median), so they are representative, busy disks rather than best cases or near-empty ones.
 """
 import os, sys, numpy as np, cv2
 HERE=os.path.dirname(os.path.abspath(__file__))
@@ -21,7 +22,7 @@ from pycocotools.coco import COCO
 from collections import defaultdict
 OUT=os.path.join(HERE,"figures")
 os.makedirs(OUT,exist_ok=True)
-PROBS=os.path.join(ROOT,"probs","4c8aa13")
+PROBS=os.path.join(ROOT,"probs","5981095")
 GT, PRED = "#2a78d6", "#eb6834"                 # reference palette, categorical slots 1 and 2
 INK, INK2, SURF = "#0b0b0b", "#52514e", "#fcfcfb"
 plt.rcParams.update({"font.size":10,"text.color":INK,"axes.labelcolor":INK2,"xtick.color":INK2,"ytick.color":INK2,
@@ -64,14 +65,15 @@ def label_map(masks):
     return lab
 
 # ---- figure 1: three validation images (25th / 50th / 85th percentile of per-annotator-copy PQ)
-scores=[]   #(PQ, file, copy index) for every annotator copy with at least one filament or prediction
+MIN_FILAMENTS=5
+scores=[]   #(PQ, file, copy index) for every annotator copy with at least MIN_FILAMENTS annotated filaments
 for f in sorted(by_file):
     p=pred_masks(f); pl=label_map(p)
     for c,img_id in enumerate(by_file[f]):
         g,ng=ev.gt_label_map(coco,img_id)
         r=ev.match(g,ng,pl,len(p))
         d=r["tp"]+0.5*r["fp"]+0.5*r["fn"]
-        if d>0: scores.append((r["sum_iou"]/d,f,c))
+        if ng>=MIN_FILAMENTS: scores.append((r["sum_iou"]/d,f,c))
 scores.sort()
 picks=[]
 for q,name in ((25,"25th percentile"),(50,"Median"),(85,"85th percentile")):
@@ -110,8 +112,8 @@ fig.tight_layout(); fig.savefig(f"{OUT}/annotators_vs_model.png",dpi=100); plt.c
 steps=[("U-Net, 5 epochs",0.277),("+ augmentation, longer training",0.346),("+ ImageNet ResNet-34 encoder",0.395),
        ("+ 2048 resolution, cosine LR",0.399),("+ confidence filter (>= 0.92)",0.413),
        ("+ full-res skip, limb normalisation",0.405),("+ clDice + Lovasz loss (conf >= 0.72)",0.426),
-       ("+ direction-aware grouping",0.433)]
-fig,ax=plt.subplots(figsize=(8,5.0))
+       ("+ direction-aware grouping",0.433),("+ soft labels, 768 px crops",0.440)]
+fig,ax=plt.subplots(figsize=(8,5.4))
 yy=np.arange(len(steps))[::-1]
 ax.barh(yy,[v for _,v in steps],height=0.55,color=GT)
 for yv,(_,v) in zip(yy,steps): ax.text(v+0.004,yv,f"{v:.3f}",va="center",color=INK,fontsize=9)

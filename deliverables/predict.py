@@ -10,13 +10,14 @@ Pipeline per image (same as evaluate.py, so validation scores carry over):
   -> drop filaments smaller than --min-area px or with mean probability below --min-conf
   -> one row per filament: filament_id = <image name>_<n>, segmentation_rle = pycocotools RLE counts
 
-Defaults are the best validation setting of the current best model, 4c8aa13 (ResNet-34 U-Net with
-full-resolution skip, limb normalisation, BCE + Dice + clDice + Lovasz loss; see README.md):
-threshold 0.5, direction-aware grouping (link), min area 250 px, min confidence 0.72.
-Older models were tuned with other settings (2026-11-11_22-03_f25df8d: --threshold 0.4 --close 61 --min-conf 0.92).
+Defaults are the best validation setting of the current best model, 5981095 (ResNet-34 U-Net with
+full-resolution skip, limb normalisation, BCE + Dice + clDice + Lovasz loss, soft labels, 768 px crops and
+tiles; see README.md): threshold 0.5, direction-aware grouping (link), no minimum area, min confidence 0.72.
+Older models were tuned with other settings (2026-11-13_06-47_4c8aa13: --min-area 250;
+2026-11-11_22-03_f25df8d: --threshold 0.4 --close 61 --min-conf 0.92).
 
 Usage (from the project folder):
-    python deliverables/predict.py --checkpoint checkpoints/2026-11-13_06-47_4c8aa13.pt
+    python deliverables/predict.py --checkpoint checkpoints/2026-11-14_03-27_5981095.pt
     python deliverables/predict.py --checkpoint deliverables/weights/resnet34_unet_2048.pt   # exported weights
     python deliverables/predict.py --images path/to/jpegs --out my_submission.csv --limit 5
 """
@@ -48,7 +49,7 @@ from evaluate import group, close_setting, drop_small, load_model, default_check
 
 TEST_IMAGES=os.path.join(ROOT,"MAGFiLO_1.0_Kaggle_2026","test","test_images")
 #best validation setting of the current best model (also used by make_figures.py)
-THRESHOLD,CLOSE,MIN_AREA,MIN_CONF=0.5,"link",250,0.72
+THRESHOLD,CLOSE,MIN_AREA,MIN_CONF=0.5,"link",0,0.72
 
 
 def load_image(path, resize_to, preprocessing=None):
