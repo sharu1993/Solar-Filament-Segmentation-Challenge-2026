@@ -234,6 +234,8 @@ mask_check_real.png
 
 # Model checkpoints
 *.pt
+# ...except the exported best-model weights (49 MB, fp16), so the pipeline notebook runs from the repo alone
+!deliverables/weights/*.pt
 # Downloaded pretrained encoder weights
 pretrained/
 # Saved probability maps (evaluate.py --save-probs)

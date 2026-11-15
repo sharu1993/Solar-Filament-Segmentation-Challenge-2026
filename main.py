@@ -64,8 +64,14 @@ if __name__=="__main__":
     #--resume checkpoints/<run>_last.pt (or an older best checkpoint <run>.pt): continue that run
     parser=argparse.ArgumentParser()
     parser.add_argument("--resume",default=None,help="checkpoint to continue training from")
+    parser.add_argument("--config-from",default=None,
+                        help="start a new run with the settings saved in this checkpoint or exported weights file "
+                             "(e.g. deliverables/weights/resnet34_unet_2048.pt to retrain the included model)")
     args=parser.parse_args()
     resume_state=None
+    if args.config_from:
+        config=torch.load(args.config_from,map_location="cpu",weights_only=False)["config"]
+        print(f"Settings from {args.config_from}: {config}")
     if args.resume:
         resume_state=torch.load(args.resume,map_location="cpu",weights_only=False)
         if resume_state.get("config") is not None:
