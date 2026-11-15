@@ -70,6 +70,8 @@ if __name__=="__main__":
     parser.add_argument("--config-from",default=None,
                         help="start a new run with the settings saved in this checkpoint or exported weights file "
                              "(e.g. deliverables/weights/resnet34_unet_2048.pt to retrain the included model)")
+    parser.add_argument("--epochs",type=int,default=None,
+                        help="number of epochs for a new run (default: config above); the cosine schedule spans them all")
     args=parser.parse_args()
     resume_state=None
     if args.config_from:
@@ -82,6 +84,10 @@ if __name__=="__main__":
         else:
             config["model"]="unet"   #checkpoints without a saved config predate the ResNet option
             print("Checkpoint has no saved config: using the config above with the plain U-Net (must match the original run).")
+    if args.epochs is not None:
+        if args.resume:
+            parser.error("--epochs only applies to a new run (the learning-rate schedule of a resumed run is fixed)")
+        config["epochs"]=args.epochs
 
     coco = annotations.read_coco_annotations(ANNOTATION_FILE)
     #annotations.view_annotations(coco,num_samples=-1)
