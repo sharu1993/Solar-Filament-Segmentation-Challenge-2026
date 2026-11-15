@@ -59,6 +59,9 @@ if __name__=="__main__":
         loss_lovasz=0.5,              #weight of the Lovasz hinge (smooth 1 - IoU) added to BCE + Dice (0 = off)
         cldice_iters=15,              #soft-skeleton iterations ~ half-width of the widest filaments (90% are <= 15 px)
         soft_labels=True,             #train on the fraction of annotators marking each pixel (False = each copy's 0/1 mask)
+        loss_skel_bce=5.0,            #BCE weight near filament centre lines is 1 + this (0 = plain BCE); discourages gaps
+        loss_instance_dice=1.0,       #weight of 1 - mean Dice per annotated filament (0 = off); each filament counts equally
+        instance_margin=32,           #instance Dice: neighbourhood around each filament, in pixels
     )
 
     #--resume checkpoints/<run>_last.pt (or an older best checkpoint <run>.pt): continue that run
@@ -139,7 +142,10 @@ if __name__=="__main__":
         #configs saved before these options existed get 0 for both, i.e. plain BCE + Dice
         criterion=losses.SegmentationLoss(cldice_weight=config.get("loss_cldice",0.0),
                                           lovasz_weight=config.get("loss_lovasz",0.0),
-                                          cldice_iters=config.get("cldice_iters",15)),
+                                          cldice_iters=config.get("cldice_iters",15),
+                                          skel_weight=config.get("loss_skel_bce",0.0),
+                                          instance_dice_weight=config.get("loss_instance_dice",0.0),
+                                          instance_margin=config.get("instance_margin",32)),
         epochs=config["epochs"],
         early_stopping_patience=config["early_stopping_patience"],
         num_workers=config["num_workers"],
