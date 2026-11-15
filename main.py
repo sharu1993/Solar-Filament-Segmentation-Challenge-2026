@@ -59,6 +59,9 @@ if __name__=="__main__":
         loss_lovasz=0.5,              #weight of the Lovasz hinge (smooth 1 - IoU) added to BCE + Dice (0 = off)
         cldice_iters=15,              #soft-skeleton iterations ~ half-width of the widest filaments (90% are <= 15 px)
         soft_labels=True,             #train on the fraction of annotators marking each pixel (False = each copy's 0/1 mask)
+        loss_skel_bce=5.0,            #BCE weight near filament centre lines is 1 + this (0 = plain BCE); discourages gaps
+        loss_instance_dice=1.0,       #weight of 1 - mean Dice per annotated filament (0 = off); each filament counts equally
+        instance_margin=32,           #instance Dice: neighbourhood around each filament, in pixels
     )
 
     #--resume checkpoints/<run>_last.pt (or an older best checkpoint <run>.pt): continue that run
@@ -67,6 +70,8 @@ if __name__=="__main__":
     parser.add_argument("--config-from",default=None,
                         help="start a new run with the settings saved in this checkpoint or exported weights file "
                              "(e.g. deliverables/weights/resnet34_unet_2048.pt to retrain the included model)")
+    parser.add_argument("--epochs",type=int,default=None,
+                        help="number of epochs for a new run (default: config above); the cosine schedule spans them all")
     args=parser.parse_args()
     resume_state=None
     if args.config_from:
@@ -79,6 +84,10 @@ if __name__=="__main__":
         else:
             config["model"]="unet"   #checkpoints without a saved config predate the ResNet option
             print("Checkpoint has no saved config: using the config above with the plain U-Net (must match the original run).")
+    if args.epochs is not None:
+        if args.resume:
+            parser.error("--epochs only applies to a new run (the learning-rate schedule of a resumed run is fixed)")
+        config["epochs"]=args.epochs
 
     coco = annotations.read_coco_annotations(ANNOTATION_FILE)
     #annotations.view_annotations(coco,num_samples=-1)
@@ -139,7 +148,10 @@ if __name__=="__main__":
         #configs saved before these options existed get 0 for both, i.e. plain BCE + Dice
         criterion=losses.SegmentationLoss(cldice_weight=config.get("loss_cldice",0.0),
                                           lovasz_weight=config.get("loss_lovasz",0.0),
-                                          cldice_iters=config.get("cldice_iters",15)),
+                                          cldice_iters=config.get("cldice_iters",15),
+                                          skel_weight=config.get("loss_skel_bce",0.0),
+                                          instance_dice_weight=config.get("loss_instance_dice",0.0),
+                                          instance_margin=config.get("instance_margin",32)),
         epochs=config["epochs"],
         early_stopping_patience=config["early_stopping_patience"],
         num_workers=config["num_workers"],

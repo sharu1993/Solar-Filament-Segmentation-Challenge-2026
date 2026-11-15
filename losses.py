@@ -1,3 +1,5 @@
+import cv2
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -53,13 +55,15 @@ def soft_skeleton(x, iters):
     return skel
 
 
-def cldice_loss(probs, targets, iters, smooth=1.0):
+def cldice_loss(probs, targets, iters, smooth=1.0, skel_t=None):
     """1 - clDice over the whole batch. Topology precision: share of the predicted centre line inside the true
     filaments; topology sensitivity: share of the true centre line covered by the prediction. Long thin parts
-    count by length, not by area, and the score barely depends on how wide each annotator drew the outline."""
+    count by length, not by area, and the score barely depends on how wide each annotator drew the outline.
+    skel_t: the target's soft skeleton, if already computed."""
     skel_p=soft_skeleton(probs,iters)
-    with torch.no_grad():
-        skel_t=soft_skeleton(targets,iters)
+    if skel_t is None:
+        with torch.no_grad():
+            skel_t=soft_skeleton(targets,iters)
     tprec=((skel_p*targets).sum()+smooth)/(skel_p.sum()+smooth)
     tsens=((skel_t*probs).sum()+smooth)/(skel_t.sum()+smooth)
     return 1-2*tprec*tsens/(tprec+tsens)
@@ -87,24 +91,105 @@ def lovasz_hinge(logits, targets):
     return torch.dot(F.relu(errors_sorted),_lovasz_grad(labels[order]))
 
 
+def skeleton_weighted_bce(probs, targets, skel_weight, iters, skel_t=None):
+    """BCE with each pixel near a filament's centre line counted 1 + skel_weight times. A gap across a filament
+    then costs as much as losing skel_weight times more area, so pieces of one filament are pushed to connect.
+    The centre line is the soft skeleton of the target (centre lines computed from the masks), widened by one
+    pixel on each side so it is not missed by a one-pixel offset. skel_t: the target's soft skeleton, if already computed."""
+    with torch.no_grad():
+        if skel_t is None:
+            skel_t=soft_skeleton(targets,iters)
+        weight=1+skel_weight*_soft_dilate(skel_t)
+    return F.binary_cross_entropy(probs,targets,weight=weight)
+
+
+def _instance_regions(labels, stats, n, margin):
+    """Each filament's neighbourhood, as (filament index, pixel index) pairs: the piece widened by margin px
+    (square dilation inside its bounding box plus margin) with the other filaments cut out. CPU and OpenCV;
+    no gradients are needed for the regions themselves."""
+    H,W=labels.shape
+    kernel=np.ones((2*margin+1,2*margin+1),np.uint8)
+    which,where=[],[]
+    for k in range(1,n):
+        x,y,w,h=stats[k,:4]
+        y0,y1,x0,x1=max(y-margin,0),min(y+h+margin,H),max(x-margin,0),min(x+w+margin,W)   #box + margin
+        lab=labels[y0:y1,x0:x1]
+        piece=(lab==k)
+        near=cv2.dilate(piece.astype(np.uint8),kernel,borderType=cv2.BORDER_CONSTANT,borderValue=0)>0
+        rows,cols=np.nonzero(near&((lab==0)|piece))
+        where.append((rows+y0)*W+(cols+x0))
+        which.append(np.full(rows.size,k-1))
+    return np.concatenate(which),np.concatenate(where)
+
+
+def instance_dice_loss(probs, targets, margin=32, smooth=1.0):
+    """Mean of 1 - Dice over the annotated filaments, so each filament counts equally, as in PQ (blob loss,
+    Kofler et al. 2023). A filament is a connected piece of the majority-vote target. Each one is scored in its
+    own neighbourhood (the piece widened by `margin` px) with the other filaments cut out, so a prediction that
+    spills into the background next to it or joins it to a neighbour lowers its score, while errors far away
+    are left to the whole-image terms. Returns 0 for a batch without filaments.
+
+    The neighbourhoods are found on the CPU (_instance_regions); on the GPU the Dice sums of all filaments in
+    the batch are one gather and one index_add, so the cost does not grow with the number of filaments."""
+    with torch.no_grad():
+        majority=(targets>=0.5).squeeze(1).to("cpu",torch.uint8).numpy()
+    B,_,H,W=probs.shape
+    which,where,count=[],[],0
+    for b in range(B):
+        n,labels,stats,_=cv2.connectedComponentsWithStats(majority[b],connectivity=8)
+        if n<=1:
+            continue
+        w_k,w_px=_instance_regions(labels,stats,n,margin)
+        which.append(w_k+count)
+        where.append(w_px+b*H*W)
+        count+=n-1
+    if not count:
+        return probs.new_zeros(())
+    which=torch.from_numpy(np.concatenate(which)).to(probs.device)
+    where=torch.from_numpy(np.concatenate(where)).to(probs.device)
+    p,t=probs.reshape(-1),targets.reshape(-1)
+    values=torch.stack([p*t,p,t],1)[where]                                    #(pixels in all regions, 3)
+    sums=values.new_zeros(count,3).index_add(0,which,values)                  #per filament: sum of p*t, p, t
+    return (1-(2*sums[:,0]+smooth)/(sums[:,1]+sums[:,2]+smooth)).mean()
+
+
 class SegmentationLoss(BCEDiceLoss):
-    """bce_weight*BCE + dice_weight*Dice + cldice_weight*(1 - clDice) + lovasz_weight*Lovasz hinge.
+    """bce_weight*BCE + dice_weight*Dice + cldice_weight*(1 - clDice) + lovasz_weight*Lovasz hinge
+    + instance_dice_weight*(1 - mean Dice per filament).
+    With skel_weight > 0 the BCE term is skeleton-weighted (skeleton_weighted_bce).
 
     Takes probabilities like BCEDiceLoss, because validation scores the blended tile map, which has no logits.
     The Lovasz term turns them back into logits (clamped at 1e-6 from 0 and 1); pixels saturated beyond that
     get no gradient from it, the same limit BCE already has on probabilities.
-    With cldice_weight=lovasz_weight=0 this is exactly BCEDiceLoss."""
-    def __init__(self, bce_weight=1.0, dice_weight=1.0, cldice_weight=0.5, lovasz_weight=0.5, cldice_iters=15, smooth=1.0):
+    With cldice_weight=lovasz_weight=skel_weight=instance_dice_weight=0 this is exactly BCEDiceLoss."""
+    def __init__(self, bce_weight=1.0, dice_weight=1.0, cldice_weight=0.5, lovasz_weight=0.5, cldice_iters=15, smooth=1.0,
+                 skel_weight=0.0, instance_dice_weight=0.0, instance_margin=32):
         super().__init__(bce_weight,dice_weight,smooth)
         self.cldice_weight=cldice_weight
         self.lovasz_weight=lovasz_weight
         self.cldice_iters=cldice_iters
+        self.skel_weight=skel_weight
+        self.instance_dice_weight=instance_dice_weight
+        self.instance_margin=instance_margin
 
     def forward(self, probs, targets):
-        loss=super().forward(probs,targets)
+        skel_t=None
+        if self.skel_weight and self.cldice_weight:
+            with torch.no_grad():
+                skel_t=soft_skeleton(targets,self.cldice_iters)    #target centre line, shared by both terms
+        if self.skel_weight:
+            #same as BCEDiceLoss.forward, with the skeleton-weighted BCE in place of the plain one
+            intersection=(probs*targets).sum()
+            dice=(2*intersection+self.smooth)/(probs.sum()+targets.sum()+self.smooth)
+            loss=(self.bce_weight*skeleton_weighted_bce(probs,targets,self.skel_weight,self.cldice_iters,skel_t)
+                  +self.dice_weight*(1-dice))
+        else:
+            loss=super().forward(probs,targets)
         if self.cldice_weight:
-            loss=loss+self.cldice_weight*cldice_loss(probs,targets,self.cldice_iters,self.smooth)
+            loss=loss+self.cldice_weight*cldice_loss(probs,targets,self.cldice_iters,self.smooth,skel_t)
         if self.lovasz_weight:
             p=probs.clamp(1e-6,1-1e-6)
             loss=loss+self.lovasz_weight*lovasz_hinge(torch.log(p)-torch.log1p(-p),targets)
+        if self.instance_dice_weight:
+            loss=loss+self.instance_dice_weight*instance_dice_loss(probs,targets,self.instance_margin,self.smooth)
         return loss
