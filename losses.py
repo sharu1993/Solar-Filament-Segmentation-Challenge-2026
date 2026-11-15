@@ -103,37 +103,54 @@ def skeleton_weighted_bce(probs, targets, skel_weight, iters, skel_t=None):
     return F.binary_cross_entropy(probs,targets,weight=weight)
 
 
+def _instance_regions(labels, stats, n, margin):
+    """Each filament's neighbourhood, as (filament index, pixel index) pairs: the piece widened by margin px
+    (square dilation inside its bounding box plus margin) with the other filaments cut out. CPU and OpenCV;
+    no gradients are needed for the regions themselves."""
+    H,W=labels.shape
+    kernel=np.ones((2*margin+1,2*margin+1),np.uint8)
+    which,where=[],[]
+    for k in range(1,n):
+        x,y,w,h=stats[k,:4]
+        y0,y1,x0,x1=max(y-margin,0),min(y+h+margin,H),max(x-margin,0),min(x+w+margin,W)   #box + margin
+        lab=labels[y0:y1,x0:x1]
+        piece=(lab==k)
+        near=cv2.dilate(piece.astype(np.uint8),kernel,borderType=cv2.BORDER_CONSTANT,borderValue=0)>0
+        rows,cols=np.nonzero(near&((lab==0)|piece))
+        where.append((rows+y0)*W+(cols+x0))
+        which.append(np.full(rows.size,k-1))
+    return np.concatenate(which),np.concatenate(where)
+
+
 def instance_dice_loss(probs, targets, margin=32, smooth=1.0):
     """Mean of 1 - Dice over the annotated filaments, so each filament counts equally, as in PQ (blob loss,
     Kofler et al. 2023). A filament is a connected piece of the majority-vote target. Each one is scored in its
     own neighbourhood (the piece widened by `margin` px) with the other filaments cut out, so a prediction that
     spills into the background next to it or joins it to a neighbour lowers its score, while errors far away
-    are left to the whole-image terms. Returns 0 for a batch without filaments."""
+    are left to the whole-image terms. Returns 0 for a batch without filaments.
+
+    The neighbourhoods are found on the CPU (_instance_regions); on the GPU the Dice sums of all filaments in
+    the batch are one gather and one index_add, so the cost does not grow with the number of filaments."""
     with torch.no_grad():
         majority=(targets>=0.5).squeeze(1).to("cpu",torch.uint8).numpy()
-    total,count=probs.new_zeros(()),0
-    for b in range(probs.shape[0]):
+    B,_,H,W=probs.shape
+    which,where,count=[],[],0
+    for b in range(B):
         n,labels,stats,_=cv2.connectedComponentsWithStats(majority[b],connectivity=8)
         if n<=1:
             continue
-        labels=torch.from_numpy(labels.astype(np.int64)).to(probs.device)
-        H,W=labels.shape
-        for k in range(1,n):
-            x,y,w,h=stats[k,:4]
-            y0,y1,x0,x1=max(y-margin,0),min(y+h+margin,H),max(x-margin,0),min(x+w+margin,W)   #box + margin
-            lab=labels[y0:y1,x0:x1]
-            piece=(lab==k)
-            with torch.no_grad():
-                #square dilation by margin, as two 1-D max-pools (same result as one square pool, much cheaper)
-                near=piece[None,None].float()
-                near=F.max_pool2d(near,(2*margin+1,1),1,(margin,0))
-                near=F.max_pool2d(near,(1,2*margin+1),1,(0,margin))[0,0]>0
-                region=(near&((lab==0)|piece)).float()       #neighbourhood minus the other filaments
-            p,t=probs[b,0,y0:y1,x0:x1]*region,targets[b,0,y0:y1,x0:x1]*region
-            dice=(2*(p*t).sum()+smooth)/(p.sum()+t.sum()+smooth)
-            total=total+(1-dice)
-            count+=1
-    return total/count if count else total
+        w_k,w_px=_instance_regions(labels,stats,n,margin)
+        which.append(w_k+count)
+        where.append(w_px+b*H*W)
+        count+=n-1
+    if not count:
+        return probs.new_zeros(())
+    which=torch.from_numpy(np.concatenate(which)).to(probs.device)
+    where=torch.from_numpy(np.concatenate(where)).to(probs.device)
+    p,t=probs.reshape(-1),targets.reshape(-1)
+    values=torch.stack([p*t,p,t],1)[where]                                    #(pixels in all regions, 3)
+    sums=values.new_zeros(count,3).index_add(0,which,values)                  #per filament: sum of p*t, p, t
+    return (1-(2*sums[:,0]+smooth)/(sums[:,1]+sums[:,2]+smooth)).mean()
 
 
 class SegmentationLoss(BCEDiceLoss):
